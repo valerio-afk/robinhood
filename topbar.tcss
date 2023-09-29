@@ -1,0 +1,75 @@
+Screen {
+    align: center middle;
+    layers: below above;
+}
+
+#status_text
+{
+    margin:1;
+    width:100%;
+}
+
+#topbar{
+    min-height:10;
+}
+
+#topbar Input
+{
+    width:30%;
+    height:3;
+}
+
+#topbar #textbox_container
+{
+    align:center top;
+}
+
+
+#topbar #work_launcher
+{
+    width:10%;
+}
+
+#topbar #actions
+{
+    width:20%;
+}
+
+.error
+{
+    border: tall $error;
+}
+
+#remote_list {
+    layer: above;
+    background: $surface;
+    width: 20;
+    margin-top:1;
+    margin-bottom:1;
+    height: 100%;
+    dock:right;
+    color: auto;
+    display: none;
+    border: round $accent;
+    padding-top:1;
+}
+
+#remote_list DataTable {
+    width: 100%;
+    height: 100%;
+    background: $panel;
+}
+
+Input.-valid {
+        border: tall $success 60%;
+}
+
+#main_pane
+{
+height:75%;
+
+}
+
+#main_pane DataTable {
+    min-height: 10;
+}
