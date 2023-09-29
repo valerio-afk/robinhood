@@ -1,5 +1,5 @@
 Screen {
-    align: center middle;
+    align: center top;
     layers: below above;
 }
 
@@ -10,13 +10,12 @@ Screen {
 }
 
 #topbar{
-    min-height:10;
+    height:8;
 }
 
 #topbar Input
 {
     width:30%;
-    height:3;
 }
 
 #topbar #textbox_container
@@ -56,7 +55,7 @@ Screen {
 
 #remote_list DataTable {
     width: 100%;
-    height: 100%;
+    /*height: 100%;*/
     background: $panel;
 }
 
@@ -66,8 +65,7 @@ Input.-valid {
 
 #main_pane
 {
-height:75%;
-
+/*height:75%;*/
 }
 
 #main_pane DataTable {

@@ -7,9 +7,10 @@ from textual.suggester import Suggester
 from textual.worker import get_current_worker
 from textual.containers import Container, Horizontal, VerticalScroll, Vertical
 from textual.events import DescendantBlur
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label
+from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
 from textual.widgets.data_table import Column
-from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration, ActionDirection, FileType, apply_changes, SyncStatus
+from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration
+from backend import ActionDirection, FileType, apply_changes, SyncStatus
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 
 _SyncMethodsPrefix:Dict[SyncMode,str] = {
@@ -61,6 +62,21 @@ class ComparisonSummary(Widget):
         this._results = results
 
     @property
+    def pending_actions(this):
+        if this.results is not None:
+            for r in this._results:
+                if (r.status != SyncStatus.SUCCESS) and (r.action_type != ActionType.NOTHING):
+                    yield r
+
+
+    @property
+    def has_pending_actions(this):
+        for _ in this.pending_actions:
+            return True
+
+        return False
+
+    @property
     def results (this):
         return this._results
 
@@ -76,23 +92,23 @@ class ComparisonSummary(Widget):
         delete_source = 0
         delete_target = 0
 
-        if (this.results is not None):
-            for r in this.results:
-                action = r.action_type
+        #if (this.results is not None):
+        for r in this.pending_actions:
+            action = r.action_type
 
-                if (action == ActionType.COPY) or (action == ActionType.UPDATE):
-                    match r.direction:
-                        case ActionDirection.SRC2DST:
-                            upload += r.a.size
-                        case ActionDirection.DST2SRC:
-                            download += r.b.size
+            if (action == ActionType.COPY) or (action == ActionType.UPDATE):
+                match r.direction:
+                    case ActionDirection.SRC2DST:
+                        upload += r.a.size
+                    case ActionDirection.DST2SRC:
+                        download += r.b.size
 
-                if (action == ActionType.DELETE):
-                    match r.direction:
-                        case ActionDirection.SRC2DST:
-                            delete_source += r.a.size
-                        case ActionDirection.DST2SRC:
-                            delete_target += r.b.size
+            if (action == ActionType.DELETE):
+                match r.direction:
+                    case ActionDirection.SRC2DST:
+                        delete_source += r.a.size
+                    case ActionDirection.DST2SRC:
+                        delete_target += r.b.size
 
         return (upload, download, delete_source, delete_target)
 
@@ -269,7 +285,7 @@ class RobinHood(App):
 
         if not this.is_working:
 
-            if (this._summary_pane.results is not None):
+            if (this._summary_pane.has_pending_actions):
                 button.variant = "warning"
                 button.label = "Synch"
                 this.bind("ctrl+n","compare_again",description="Re-run comparison")
@@ -301,8 +317,8 @@ class RobinHood(App):
 
             this._update_job_related_interface()
             this.set_status("[bright_magenta]Operation stopped[/]")
-        elif this._tree_pane.results is not None:
-            raise NotImplementedError("Not yet mate!")
+        elif this._summary_pane.has_pending_actions:
+            this._run_synch()
 
         else:
             if (this.syncmode is None):
@@ -417,6 +433,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
         if action.status == SyncStatus.NOT_STARTED:
             desc_action = ""
+            more_info = ""
             match action.action_type:
                 case ActionType.DELETE:
                     desc_action = "Deleting"
@@ -424,17 +441,16 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     desc_action = "Creating directory"
                 case ActionType.UPDATE | ActionType.COPY:
                     desc_action = "Copying"
+                    more_info = f" {action.get_update().progress}%"
 
-            desc = f"{desc_action} {p}"
+            desc = f"{desc_action} {p} {more_info}"
             this.update_status(desc)
 
 
-
-
-
-
-
     def after_synching(this, event:SyncEvent) -> None:
+        this._gui._kill_workers()
+        this._gui._update_job_related_interface()
+
         this.update_status(f"[green]Synchronisation finished[/]")
 
 
@@ -486,44 +502,49 @@ class FileTreeTable(DataTable):
         results = sorted(results,key=lambda x : str(x.a))
 
         for x in results:
-            match x.action_type:
-                case ActionType.MKDIR | ActionType.COPY:
-                    dir_frm=frm = "[green]"
-                case ActionType.UPDATE:
-                    dir_frm=frm = "[bright_green]"
-                case ActionType.DELETE:
-                    frm = '[s magenta]'
-                    dir_frm = "[magenta]"
-                case _:
-                    dir_frm=frm = "[grey]"
+            rendered_row = FileTreeTable._render_row(x)
+            this.add_row(*rendered_row)
 
-
-            direction = "-" if x.action_type == ActionType.NOTHING else x.direction.value
-
-            src = ""
-            dst = ""
-
-            icon_src = ""
-            icon_dst = ""
-
-            if (x.a is not None):
-                icon_src = ":open_file_folder:" if x.a.type == FileType.DIR else ":page_facing_up:"
-                src = x.a.relative_path
-
-            if (x.b is not None):
-                icon_dst = ":open_file_folder:" if x.b.type == FileType.DIR else ":page_facing_up:"
-                dst = x.b.relative_path
-
-            src_column = Text.from_markup(f"{frm}{icon_src}{src}[/]")
-            dst_column = Text.from_markup(f"{frm}{icon_dst}{dst}[/]")
-
-            src_column.overflow = dst_column.overflow = "ellipsis"
-            src_column.no_wrap = dst_column.no_wrap = True
-
-            this.add_row(
-                src_column,
-                Text.from_markup(f"{dir_frm}{direction}[/]",justify="center"),
-                dst_column
-            )
 
         this.focus()
+
+    @classmethod
+    def _render_row(cls,x:SyncAction):
+        match x.action_type:
+            case ActionType.MKDIR | ActionType.COPY:
+                dir_frm = frm = "[green]"
+            case ActionType.UPDATE:
+                dir_frm = frm = "[bright_green]"
+            case ActionType.DELETE:
+                frm = '[s magenta]'
+                dir_frm = "[magenta]"
+            case _:
+                dir_frm = frm = "[grey]"
+
+        direction = "-" if x.action_type == ActionType.NOTHING else x.direction.value
+
+        src = ""
+        dst = ""
+
+        icon_src = ""
+        icon_dst = ""
+
+        if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
+            icon_src = ":open_file_folder:" if x.a.type == FileType.DIR else ":page_facing_up:"
+            src = x.a.relative_path
+
+        if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
+            icon_dst = ":open_file_folder:" if x.b.type == FileType.DIR else ":page_facing_up:"
+            dst = x.b.relative_path
+
+        src_column = Text.from_markup(f"{frm}{icon_src}{src}[/]")
+        dst_column = Text.from_markup(f"{frm}{icon_dst}{dst}[/]")
+
+        src_column.overflow = dst_column.overflow = "ellipsis"
+        src_column.no_wrap = dst_column.no_wrap = True
+
+        return (
+            src_column,
+            Text.from_markup(f"{dir_frm}{direction}[/]", justify="center"),
+            dst_column
+        )

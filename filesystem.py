@@ -47,72 +47,6 @@ def get_rclone_remotes():
 
     return [tuple([x.strip() for x in line.split(":")[::-1]]) for line in output.stdout.strip().split("\n")]
 
-class FileType(Enum):
-    OTHER=0
-    REGULAR=1
-    DIR=2
-class FileSystemObject:
-
-    def __init__(this,fullpath,type,size,mtime,hidden=False):
-        this.fullpath=fullpath
-        this.type=type
-        this.size=size
-        this.mtime=mtime
-        this.hidden=hidden
-        this.processed=False
-
-    @property
-    def absolute_path(this):
-        return this.fullpath.absolute_path
-
-    # @property
-    # def absolute_path(this):
-    #     return "/"+this.relative_path
-
-    @property
-    def relative_path(this):
-        return this.fullpath.relative_path
-
-    def __eq__(this,other):
-        if type(other) == str:
-            return (this.absolute_path==other) or (this.relative_path == other)
-        elif isinstance(other,FileSystemObject):
-            return this.relative_path == other.relative_path
-        else:
-            return False
-
-    def __hash__(this):
-        return hash(this.relative_path)
-
-    def __str__(this):
-        return this.relative_path
-
-    def __repr__(this):
-        return str(this)
-
-    @property
-    def is_remote(this):
-        for _,drive in get_rclone_remotes():
-            if this.path.startswith(drive):
-                return True
-        return False
-
-    @property
-    def is_local(this):
-        return not this.is_remote
-
-class PathException(Exception):
-    ...
-
-class MissingAbsolutePathException(PathException):
-
-    def __init__(this, path,desc="Path"):
-        super().__init__(f"{desc} {path} is not an absolute path.")
-
-class PathOutsideRootException(PathException):
-
-    def __init__(this,root,path):
-        super().__init__(f"The path {path} is not rooted in {root}")
 class PathManager(ABC):
     PATH_SEPARATOR = '/'
     VOLUME_SEPARATOR = ":"
@@ -261,6 +195,79 @@ class PathManager(ABC):
     def is_under_root(this, path):
         return this.is_root_of(path,this.root)
 
+
+class FileType(Enum):
+    OTHER=0
+    REGULAR=1
+    DIR=2
+
+class FileSystemObject:
+
+    def __init__(this,
+                 fullpath:Union[PathManager|None],
+                 type:FileType,
+                 size:int,
+                 mtime:datetime,
+                 hidden:bool=False):
+        this.fullpath=fullpath
+        this.type=type
+        this.size=size
+        this.mtime=mtime
+        this.hidden=hidden
+        this.processed=False
+
+    @property
+    def absolute_path(this):
+        return this.fullpath.absolute_path
+
+    @property
+    def relative_path(this):
+        return this.fullpath.relative_path
+
+    @property
+    def containing_directory(this):
+        return os.path.split(this.absolute_path)[0]
+
+    def __eq__(this,other):
+        if type(other) == str:
+            return (this.absolute_path==other) or (this.relative_path == other)
+        elif isinstance(other,FileSystemObject):
+            return this.relative_path == other.relative_path
+        else:
+            return False
+
+    def __hash__(this):
+        return hash(this.relative_path)
+
+    def __str__(this):
+        return this.relative_path
+
+    def __repr__(this):
+        return str(this)
+
+    @property
+    def is_remote(this):
+        for _,drive in get_rclone_remotes():
+            if this.path.startswith(drive):
+                return True
+        return False
+
+    @property
+    def is_local(this):
+        return not this.is_remote
+
+class PathException(Exception):
+    ...
+
+class MissingAbsolutePathException(PathException):
+
+    def __init__(this, path,desc="Path"):
+        super().__init__(f"{desc} {path} is not an absolute path.")
+
+class PathOutsideRootException(PathException):
+
+    def __init__(this,root,path):
+        super().__init__(f"The path {path} is not rooted in {root}")
 
 
 class PosixPathManager(PathManager):
@@ -455,8 +462,8 @@ class FileSystem(ABC):
     def exists(this,filename):
         ...
 
-    def new_path(this,path,root=None):
-        return this._path_manager(path,root)
+    def new_path(this,path:str,root:Union[str|None]=None):
+        return this._path_manager(path,root if root is not None else this.root)
 
 
 class LocalFileSystem(FileSystem):

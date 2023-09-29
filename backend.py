@@ -22,13 +22,14 @@ class ActionType(Enum):
 
 @dataclass(frozen=True)
 class SyncProgress():
+    prog_transferring:str=None
     progress:float = 0
     total_bits:float=0
     sent_bits:float = 0
-    unit_sent:str = ""
-    unit_total:str = ""
+    unit_sent:str = None
+    unit_total:str = None
     transfer_speed:float = 0
-    transfer_speed_unit:str = ""
+    transfer_speed_unit:str = None
 
 class RobinHoodConfiguration:
     source_path: Union[str|None]=None
@@ -151,18 +152,18 @@ class SyncAction:
                 except Exception:
                     this._status = SyncStatus.FAILED
             case ActionType.UPDATE | ActionType.COPY:
-                x = this.a
-                y = this.b
+                x = this.a.absolute_path
+                y = this.b.containing_directory
 
                 if (this.direction == ActionDirection.DST2SRC):
                     x,y=y,x
 
-                copy(x.absolute_path,y.absolute_path,show_progress=show_progress,listener=_update_internal_status)
+                copy(x,y,show_progress=show_progress,listener=_update_internal_status)
+                this._status = SyncStatus.SUCCESS if  (this._update is None) or (this._update.progress == 100) else SyncStatus.FAILED
+            case ActionType.NOTHING:
+                this._status = SyncStatus.SUCCESS
 
         _trigger("on_synching", SyncEvent(this))
-
-
-
 
 
     def get_update(this) -> Union[SyncProgress|None]:
@@ -253,13 +254,22 @@ def compare_tree(src:Union[str|FileSystem],
                 tree.append(SyncAction(a[idx_src],b[idx_dst]))
 
         for f in unique_files:
-            x = None
-            y = f
-            dir = ActionDirection.DST2SRC
+            new_file_object = FileSystemObject(fullpath=None,
+                                               type=f.type,
+                                               size=f.size,
+                                               mtime=f.mtime,
+                                               hidden=f.hidden)
 
             if (src.root in f.absolute_path):
-                x,y=y,x
+                new_file_object.fullpath = dest.new_path(f.relative_path)
+                x = f
+                y = new_file_object
                 dir = ActionDirection.SRC2DST
+            else:
+                new_file_object.fullpath = src.new_path(f.relative_path)
+                x = new_file_object
+                y = f
+                dir = ActionDirection.DST2SRC
 
             action = ActionType.COPY if f.type == FileType.REGULAR else ActionType.MKDIR
 
