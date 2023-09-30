@@ -63,11 +63,50 @@ Input.-valid {
         border: tall $success 60%;
 }
 
-#main_pane
+FileTreeTable
 {
-/*height:75%;*/
+    min-height: 5
 }
 
-#main_pane DataTable {
-    min-height: 10;
+
+#summary_block {
+    background: $accent;
+    height: 1;
 }
+
+#summary_block ProgressBar{
+    dock: right;
+}
+
+#summary_block Label.sync_eta{
+    dock: right;
+}
+
+#summary_block ProgressBar{
+    display: none;
+    dock: right;
+
+}
+
+HeaderIcon{
+    display: none;
+}
+
+#summary_block ProgressBar.synching{
+    display: block;
+
+}
+
+#summary_block ProgressBar Bar > .bar--bar,
+#summary_block ProgressBar Bar > .bar--indeterminate,
+#summary_block ProgressBar Bar > .bar--complete
+{
+    color: $success;
+    background: darkgreen;
+}
+
+#summary_block ProgressBar Bar > .bar--complete
+{
+    color: $warning
+}
+

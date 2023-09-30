@@ -1,11 +1,68 @@
-from typing import Union,List, Iterable, Callable, Dict
+from typing import Union,List, Iterable, Callable, Dict, Tuple, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from enum import Enum
-from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir
+from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir, convert_to_bytes
 from file_filters import UnixPatternExpasionFilter,RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
+import subprocess
+import re
+import rclone_python
+
+def improved_extract_rclone_progress(buffer: str) -> Tuple[bool, Union[Dict[str, Any], None]]:
+    # matcher that checks if the progress update block is completely buffered yet (defines start and stop)
+    # it gets the sent bits, total bits, progress, transfer-speed and eta
+    reg_transferred = re.findall(
+        r"Transferred:\s+(\d+(.\d+)? \w+) \/ (\d+.\d+ \w+), (\d{1,3})%, (\d+(.\d+)? \w+\/\w+), ETA (\S+)", #fixed pattern
+        buffer,
+    )
+
+    def _extract_value_unit(pattern:str) -> Tuple[float,str]:
+        try:
+            a,b = pattern.strip().split(" ")
+        except ValueError:
+            a = pattern.strip()
+            b = "B/s"
+
+        a = float(a)
+        return a,b
+
+    if reg_transferred:  # transferred block is completely buffered
+        # get the progress of the individual files
+        # matcher gets the currently transferring files and their individual progress
+        # returns list of tuples: (name, progress, file_size, unit)
+        prog_transferring = []
+        prog_regex = re.findall(
+            r"\* +(.+):[ ]+(\d{1,3})% \/(\d+.\d+)([a-zA-Z]+),", buffer
+        )
+        for item in prog_regex:
+            prog_transferring.append(
+                (
+                    item[0],
+                    int(item[1]),
+                    float(item[2]),
+                    # the suffix B of the unit is missing for subprocesses
+                    item[3] + "B",
+                )
+            )
+
+        out = {"prog_transferring": prog_transferring}
+        sent_bits, _, total_bits, progress, transfer_speed_str, _,  eta = reg_transferred[0]
+        out["progress"] = float(progress.strip())
+
+        out["total_bits"] , out["unit_total"] = _extract_value_unit(total_bits)
+        out["sent_bits"], out["unit_sent"] = _extract_value_unit(sent_bits)
+        out["transfer_speed"], out["transfer_speed_unit"] = _extract_value_unit(transfer_speed_str)
+
+        out["eta"] = eta
+
+        return True, out
+
+    else:
+        return False, None
+
+rclone_python.rclone.utils.extract_rclone_progress = improved_extract_rclone_progress
 
 class SyncMode(Enum):
     UPDATE:int = 0
@@ -22,14 +79,24 @@ class ActionType(Enum):
 
 @dataclass(frozen=True)
 class SyncProgress():
-    prog_transferring:str=None
+    prog_transferring:str=""
     progress:float = 0
     total_bits:float=0
     sent_bits:float = 0
-    unit_sent:str = None
-    unit_total:str = None
+    unit_sent:str = ""
+    unit_total:str = ""
     transfer_speed:float = 0
-    transfer_speed_unit:str = None
+    transfer_speed_unit:str = ""
+    eta:str=""
+
+
+    @property
+    def bytes_transferred(this):
+        return convert_to_bytes(this.sent_bits, this.unit_sent)
+
+    @property
+    def bytes_total(this):
+        return convert_to_bytes(this.total_bits, this.unit_total)
 
 class RobinHoodConfiguration:
     source_path: Union[str|None]=None
@@ -144,11 +211,10 @@ class SyncAction:
 
         match this.action_type:
             case ActionType.MKDIR:
-                this._status = SyncStatus.SUCCESS if mkdir(this.get_one_path) else SyncStatus.FAILED
+                mkdir(this.get_one_path)
             case ActionType.DELETE:
                 try:
                     delete(this.get_one_path.absolute_path)
-                    this._status = SyncStatus.SUCCESS
                 except Exception:
                     this._status = SyncStatus.FAILED
             case ActionType.UPDATE | ActionType.COPY:
@@ -158,53 +224,62 @@ class SyncAction:
                 if (this.direction == ActionDirection.DST2SRC):
                     x,y=y,x
 
+                this._status = SyncStatus.IN_PROGRESS
                 copy(x,y,show_progress=show_progress,listener=_update_internal_status)
-                this._status = SyncStatus.SUCCESS if  (this._update is None) or (this._update.progress == 100) else SyncStatus.FAILED
-            case ActionType.NOTHING:
-                this._status = SyncStatus.SUCCESS
+
+
+        this._check_success()
 
         _trigger("on_synching", SyncEvent(this))
 
+    def _check_success(this):
+        x = this.a
+        y = this.b
+
+        if (this.direction == ActionDirection.DST2SRC):
+            x, y = y, x
+
+        match this.action_type:
+            case ActionType.MKDIR:
+                success = y.exists
+            case ActionType.UPDATE | ActionType.COPY:
+                success = (y.exists) and (x.size == y.size)
+            case ActionType.DELETE:
+                success = not y.exists
+            case _:
+                success = True
+
+        this._status = SyncStatus.SUCCESS if success else SyncStatus.FAILED
 
     def get_update(this) -> Union[SyncProgress|None]:
-        if  (this.status != SyncStatus.IN_PROGRESS):
-            return None
-
-        delta = datetime.now() - this._last_update
-
-        if (delta.total_seconds()>this._timeout):
-            this._status = SyncStatus.INTERRUPTED
-
         return this._update
 
 
 
 
 class RobinHoodBackend(ABC):
-
-
     @abstractmethod
-    def before_comparing(this, event):
+    def before_comparing(this, event:SyncEvent) -> None:
         ...
 
     @abstractmethod
-    def on_comparing(this,event):
+    def on_comparing(this,event:SyncEvent) -> None:
         ...
 
     @abstractmethod
-    def after_comparing(this, event):
+    def after_comparing(this, event:SyncEvent) -> None:
         ...
 
     @abstractmethod
-    def before_synching(this, event):
+    def before_synching(this, event:SyncEvent) -> None:
         ...
 
     @abstractmethod
-    def on_synching(this, event):
+    def on_synching(this, event:SyncEvent) -> None:
         ...
 
     @abstractmethod
-    def after_synching(this, event):
+    def after_synching(this, event:SyncEvent) -> None:
         ...
 
 
@@ -227,64 +302,134 @@ def compare_tree(src:Union[str|FileSystem],
         dest.cached=True
 
 
-    directories_to_visit = ['.']
-    tree = []
+    #directories_to_visit = ['.']
+    #tree = []
 
     src.load()
     dest.load()
 
-    while len(directories_to_visit)>0:
-        cp = directories_to_visit.pop()
+    report = subprocess.run(['rclone', 'check', src.root, dest.root, '--combined', '-'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
-        a = src.ls(cp)
-        b = dest.ls(cp)
+    results = []
 
-        _trigger("on_comparing", SyncEvent(cp))
+    for line in report.stdout.decode().splitlines():
+        action, path = line.split(" ", maxsplit=1)
+        _trigger("on_comparing", SyncEvent(path))
 
-        common_files = set(a) & set(b)
-        unique_files = set(a) ^ set(b)
-
-        directories_to_visit += [d.relative_path for d in list(common_files) if d.type == FileType.DIR]
-
-        for f in common_files:
-            if f.type == FileType.REGULAR:
-                idx_src = a.index(f)
-                idx_dst = b.index(f)
-
-                tree.append(SyncAction(a[idx_src],b[idx_dst]))
-
-        for f in unique_files:
-            new_file_object = FileSystemObject(fullpath=None,
-                                               type=f.type,
-                                               size=f.size,
-                                               mtime=f.mtime,
-                                               hidden=f.hidden)
-
-            if (src.root in f.absolute_path):
-                new_file_object.fullpath = dest.new_path(f.relative_path)
-                x = f
-                y = new_file_object
-                dir = ActionDirection.SRC2DST
-            else:
-                new_file_object.fullpath = src.new_path(f.relative_path)
-                x = new_file_object
-                y = f
-                dir = ActionDirection.DST2SRC
-
-            action = ActionType.COPY if f.type == FileType.REGULAR else ActionType.MKDIR
-
-            if f.type == FileType.DIR:
-                directories_to_visit.append(f.relative_path)
-
-            tree.append(SyncAction(x,y,action,dir))
+        src_path  = src.new_path(path)
+        dest_path = dest.new_path(path)
 
 
-    tree = filter_results(tree)
-    results_for_update(tree)
+        source_object = None
+        dest_object = None
 
-    _trigger("after_comparing",SyncEvent(tree))
 
-    return tree
+        #TODO: presence of directories are not found. You need to add something to make suitable mkdir actions
+
+        try:
+            source_object = src.get_file(src_path)
+        except FileNotFoundError:
+            ...
+
+        try:
+            dest_object   = dest.get_file(dest_path)
+        except FileNotFoundError:
+            ...
+
+
+        direction = ActionDirection.SRC2DST
+
+        match action:
+            case "+":
+                dest_object = FileSystemObject(fullpath=dest_path,
+                                               type=source_object.type,
+                                               size=None,
+                                               mtime=None,
+                                               hidden=source_object.hidden)
+
+                action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
+
+            case "-":
+                source_object = FileSystemObject(fullpath=src_path,
+                                               type=dest_object.type,
+                                               size=None,
+                                               mtime=None,
+                                               hidden=dest_object.hidden)
+
+                action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR
+                direction = ActionDirection.DST2SRC
+
+            case "*":
+                if source_object.mtime >= dest_object.mtime:
+                    action = ActionType.UPDATE
+                    direction = ActionDirection.SRC2DST
+                else:
+                    action = ActionType.UPDATE
+                    direction = ActionDirection.DST2SRC
+
+            case "!":
+                action = ActionType.UNKNOWN
+
+            case _:
+                action = ActionType.NOTHING
+
+        results.append(SyncAction(source_object, dest_object, action, direction))
+
+
+
+
+    # while len(directories_to_visit)>0:
+    #     cp = directories_to_visit.pop()
+    #
+    #     a = src.ls(cp)
+    #     b = dest.ls(cp)
+    #
+    #     _trigger("on_comparing", SyncEvent(cp))
+    #
+    #     common_files = set(a) & set(b)
+    #     unique_files = set(a) ^ set(b)
+    #
+    #     directories_to_visit += [d.relative_path for d in list(common_files) if d.type == FileType.DIR]
+    #
+    #     for f in common_files:
+    #         if f.type == FileType.REGULAR:
+    #             idx_src = a.index(f)
+    #             idx_dst = b.index(f)
+    #
+    #             tree.append(SyncAction(a[idx_src],b[idx_dst]))
+    #
+    #     for f in unique_files:
+    #         new_file_object = FileSystemObject(fullpath=None,
+    #                                            type=f.type,
+    #                                            size=None,
+    #                                            mtime=f.mtime,
+    #                                            hidden=f.hidden)
+    #
+    #         if (src.root in f.absolute_path):
+    #             new_file_object.fullpath = dest.new_path(f.relative_path)
+    #             x = f
+    #             y = new_file_object
+    #             dir = ActionDirection.SRC2DST
+    #         else:
+    #             new_file_object.fullpath = src.new_path(f.relative_path)
+    #             x = new_file_object
+    #             y = f
+    #             dir = ActionDirection.DST2SRC
+    #
+    #         action = ActionType.COPY if f.type == FileType.REGULAR else ActionType.MKDIR
+    #
+    #         if f.type == FileType.DIR:
+    #             directories_to_visit.append(f.relative_path)
+    #
+    #         tree.append(SyncAction(x,y,action,dir))
+
+
+    results = filter_results(results)
+    results_for_update(results)
+
+    _trigger("after_comparing",SyncEvent(results))
+
+    return results
 
 
 def apply_changes(changes:Iterable[SyncAction],

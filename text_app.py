@@ -9,8 +9,9 @@ from textual.containers import Container, Horizontal, VerticalScroll, Vertical
 from textual.events import DescendantBlur
 from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
 from textual.widgets.data_table import Column
+from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration
-from backend import ActionDirection, FileType, apply_changes, SyncStatus
+from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 
 _SyncMethodsPrefix:Dict[SyncMode,str] = {
@@ -198,6 +199,7 @@ class RobinHood(App):
         this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
         this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
+        this._progress_bar:ProgressBar = ProgressBar(id="synch_progbar")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
 
     def post_display_hook(this) -> None:
@@ -274,6 +276,26 @@ class RobinHood(App):
 
         return False
 
+    @property
+    def is_synching(this) -> bool:
+        for w in this.workers:
+            if (w.name == "synching") and w.is_running:
+                return True
+
+        return False
+
+
+    @property
+    def show_progressbar(this):
+        return this._progress_bar.has_class("synching")
+
+    @show_progressbar.setter
+    def show_progressbar(this, show:bool):
+        if show:
+            this._progress_bar.add_class("synching")
+        else:
+            this._progress_bar.remove_class("synching")
+
     def _kill_workers(this) -> None:
         for w in this.workers:
             if w.name in ["comparison","synching"]:
@@ -284,7 +306,6 @@ class RobinHood(App):
         enablable = this.query("#topbar Input, #topbar Select")
 
         if not this.is_working:
-
             if (this._summary_pane.has_pending_actions):
                 button.variant = "warning"
                 button.label = "Synch"
@@ -295,9 +316,14 @@ class RobinHood(App):
 
             for x in enablable:
                 x.disabled = False
+
+            this.show_progressbar = False
         else:
             button.variant = "error"
             button.label = "Stop"
+
+            if (this.is_synching):
+                this.show_progressbar = True
 
             for x in enablable:
                 x.disabled=True
@@ -315,11 +341,9 @@ class RobinHood(App):
                 if w.name in ["comparison","synching"]:
                     w.cancel()
 
-            this._update_job_related_interface()
             this.set_status("[bright_magenta]Operation stopped[/]")
         elif this._summary_pane.has_pending_actions:
             this._run_synch()
-
         else:
             if (this.syncmode is None):
                 this.query_one("#syncmethod SelectCurrent").add_class("error")
@@ -336,7 +360,7 @@ class RobinHood(App):
                 case _:
                     raise NotImplementedError("Sync mode not implemented yet!")
 
-            this._update_job_related_interface()
+        this._update_job_related_interface()
 
 
     @work(exclusive=True,name="comparison",thread=True)
@@ -349,13 +373,25 @@ class RobinHood(App):
         apply_changes(this._tree_pane.results,this._backend)
 
 
+    def update_progressbar(this, update:SyncProgress):
+        this._progress_bar.update(total=update.bytes_total,
+                                  progress=update.bytes_transferred
+                                  )
+
+
     def show_results(this,results:Union[Iterable[SyncAction]|None]) -> None:
         this._tree_pane.show_results(results)
         this._summary_pane.results = results
         this._update_job_related_interface()
 
+    def update_row_at(this,action:SyncAction):
+        this._tree_pane.update_action(action)
+
 
     def compose(this) -> ComposeResult:
+        this.screen.title = "🏹 Robin Hood"
+        this.screen.sub_title = "Steal from the rich and give to the poor"
+
         yield Header()
         yield RobinHoodTopBar(
             src=RobinHoodConfiguration().source_path,
@@ -364,7 +400,11 @@ class RobinHood(App):
             id="topbar",
             classes="overlayable")
         yield Vertical(
-            this._summary_pane,
+            Horizontal(
+                this._summary_pane,
+                this._progress_bar,
+                id="summary_block"
+            ),
             this._tree_pane,
             id="main_pane",
             classes="overlayable"
@@ -399,7 +439,16 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def update_status(this,text:str)->None:
         this._gui.call_from_thread(this._gui.set_status,text)
 
+    def update_progressbar(this, update:SyncProgress):
+        this._gui.call_from_thread(this._gui.update_progressbar, update)
 
+
+    def update_table_row(this, action:SyncAction):
+        this._gui.call_from_thread(this._gui.update_row_at, action)
+
+    def clean_up(this):
+        this._gui.call_from_thread(this._gui._kill_workers)
+        this._gui.call_from_thread(this._gui._update_job_related_interface)
 
     def _check_running_status(this) -> None:
         if (get_current_worker().is_cancelled):
@@ -417,8 +466,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
 
     def after_comparing(this, event:SyncEvent) -> None:
-        this._gui._kill_workers()
-        this._gui._update_job_related_interface()
+        this.clean_up()
         this.update_status(f"[green]Directory comparison finished[/]")
 
     def before_synching(this, event:SyncEvent) -> None:
@@ -431,9 +479,12 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
         p = action.get_one_path.relative_path
 
-        if action.status == SyncStatus.NOT_STARTED:
+        if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
             desc_action = ""
             more_info = ""
+
+            update = action.get_update()
+
             match action.action_type:
                 case ActionType.DELETE:
                     desc_action = "Deleting"
@@ -441,16 +492,21 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     desc_action = "Creating directory"
                 case ActionType.UPDATE | ActionType.COPY:
                     desc_action = "Copying"
-                    more_info = f" {action.get_update().progress}%"
+
+                    if update is not None:
+                        more_info = f"{update.progress}%"
 
             desc = f"{desc_action} {p} {more_info}"
             this.update_status(desc)
 
+            if update is not None:
+                this.update_progressbar(update)
+
+        this.update_table_row(action)
+
 
     def after_synching(this, event:SyncEvent) -> None:
-        this._gui._kill_workers()
-        this._gui._update_job_related_interface()
-
+        this.clean_up()
         this.update_status(f"[green]Synchronisation finished[/]")
 
 
@@ -508,6 +564,25 @@ class FileTreeTable(DataTable):
 
         this.focus()
 
+    def update_action(this, action:SyncAction):
+        if (this._results is None): return
+
+        results = this._results
+
+        if (not isinstance(this._results,list)):
+            results = [x for x in results]
+
+        try:
+            i = results.index(action)
+            columns = this._render_row(action)
+
+            for j in range(len(this.columns)):
+                this.update_cell_at(Coordinate(i,j),columns[j],update_width=False)
+        except ValueError:
+            ...
+
+
+
     @classmethod
     def _render_row(cls,x:SyncAction):
         match x.action_type:
@@ -543,8 +618,15 @@ class FileTreeTable(DataTable):
         src_column.overflow = dst_column.overflow = "ellipsis"
         src_column.no_wrap = dst_column.no_wrap = True
 
+        central_column = f"{dir_frm}{direction}[/]"
+
+        if (x.status == SyncStatus.SUCCESS):
+            central_column = ":white_heavy_check_mark:"
+        elif (x.status == SyncStatus.FAILED):
+            central_column = ":cross_mark:"
+
         return (
             src_column,
-            Text.from_markup(f"{dir_frm}{direction}[/]", justify="center"),
+            Text.from_markup(central_column, justify="center"),
             dst_column
         )

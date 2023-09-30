@@ -13,6 +13,7 @@ import subprocess
 
 is_windows = lambda : os.name =='nt'
 
+UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
 
 def _fix_isotime(time):
     pattern = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]*)\+[0-9]{2}:[0-9]{2}"
@@ -30,11 +31,20 @@ def sizeof_fmt(num:int, suffix:str="B") -> str:
     if (num == 0):
         return "-"
     
-    for unit in ("", "K", "M", "G", "T", "P", "E", "Z"):
+    for unit in UNITS:
         if abs(num) < 1024.0:
             return f"{num:3.1f}{unit}{suffix}"
         num /= 1024.0
     return f"{num:.1f}Y{suffix}"
+
+
+def convert_to_bytes(value:float,unit:str) -> int:
+    for i,u in enumerate(UNITS[1:]):
+        if u in unit:
+            return int(value * (1024**(i+1)))
+
+    return int(value)
+
 
 
 def get_rclone_remotes():
@@ -206,12 +216,12 @@ class FileSystemObject:
     def __init__(this,
                  fullpath:Union[PathManager|None],
                  type:FileType,
-                 size:int,
-                 mtime:datetime,
+                 size:Union[int|None],
+                 mtime:Union[datetime|None],
                  hidden:bool=False):
         this.fullpath=fullpath
         this.type=type
-        this.size=size
+        this._size=size
         this.mtime=mtime
         this.hidden=hidden
         this.processed=False
@@ -236,25 +246,48 @@ class FileSystemObject:
         else:
             return False
 
-    def __hash__(this):
+    def __hash__(this) -> int:
         return hash(this.relative_path)
 
-    def __str__(this):
+    def __str__(this) -> str:
         return this.relative_path
 
-    def __repr__(this):
+    def __repr__(this) -> str:
         return str(this)
 
     @property
-    def is_remote(this):
+    def is_remote(this) -> bool:
         for _,drive in get_rclone_remotes():
             if this.path.startswith(drive):
                 return True
         return False
 
     @property
-    def is_local(this):
+    def is_local(this) -> bool:
         return not this.is_remote
+
+    @property
+    def size(this) -> int:
+        if (this._size is not None):
+            return this._size
+
+        output = subprocess.run(['rclone', 'size', this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+
+        if output.returncode != 0:
+            return -1
+
+        report = output.stdout.decode()
+        matches = re.findall(r"\((\d+) \w+\)",report)
+
+        if (len(matches)==0):
+            return -1
+
+        return int(matches.pop())
+    @property
+    def exists(this) -> bool:
+        output = subprocess.run(['rclone','lsf',this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+
+        return output.returncode == 0
 
 class PathException(Exception):
     ...
@@ -459,10 +492,14 @@ class FileSystem(ABC):
         return this._path.visit(path)
 
     @abstractmethod
-    def exists(this,filename):
+    def exists(this,filename) -> bool:
         ...
 
-    def new_path(this,path:str,root:Union[str|None]=None):
+    @abstractmethod
+    def get_file(this,path:PathManager) -> FileSystemObject:
+        ...
+
+    def new_path(this,path:str,root:Union[str|None]=None) -> PathManager:
         return this._path_manager(path,root if root is not None else this.root)
 
 
@@ -527,7 +564,15 @@ class LocalFileSystem(FileSystem):
 
         return os.path.exists(p.absolute_path)
 
-    def _make_local_filesystem_object(this,filename, path):
+    def get_file(this,path:PathManager) -> FileSystemObject:
+        p, name = os.path.split(path.relative_path)
+
+        if p == "":
+            p = "./"
+
+        return this._make_local_filesystem_object(name,p)
+
+    def _make_local_filesystem_object(this,filename:str, path:str) -> FileSystemObject:
         # if path.endswith('/'):
         #     path = path[:-1]
         #
@@ -621,7 +666,24 @@ class RemoteFileSystem(FileSystem):
 
         return "not found" not in output.stderr
 
-    def _make_remote_filesystem_object(this,dic, path):
+    def get_file(this,path:PathManager) -> FileSystemObject:
+        p,name = os.path.split(path.relative_path)
+
+        parent_path = this.new_path(p)
+
+        content = this._dir(parent_path)
+
+        for itm in content:
+            if itm['Name'] == name:
+                return this._make_remote_filesystem_object(itm,parent_path.absolute_path)
+
+        raise FileNotFoundError(f"No such file or directory: '{path}'")
+
+
+
+
+        return None
+    def _make_remote_filesystem_object(this,dic:dict, path:str):
         type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
 
         fullpath = this.new_path(PathManager.join(path, dic['Name']), root=this.root)
