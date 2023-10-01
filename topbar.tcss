@@ -94,7 +94,6 @@ HeaderIcon{
 
 #summary_block ProgressBar.synching{
     display: block;
-
 }
 
 #summary_block ProgressBar Bar > .bar--bar,

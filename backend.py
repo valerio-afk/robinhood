@@ -324,8 +324,6 @@ def compare_tree(src:Union[str|FileSystem],
         dest_object = None
 
 
-        #TODO: presence of directories are not found. You need to add something to make suitable mkdir actions
-
         try:
             source_object = src.get_file(src_path)
         except FileNotFoundError:
@@ -374,55 +372,6 @@ def compare_tree(src:Union[str|FileSystem],
                 action = ActionType.NOTHING
 
         results.append(SyncAction(source_object, dest_object, action, direction))
-
-
-
-
-    # while len(directories_to_visit)>0:
-    #     cp = directories_to_visit.pop()
-    #
-    #     a = src.ls(cp)
-    #     b = dest.ls(cp)
-    #
-    #     _trigger("on_comparing", SyncEvent(cp))
-    #
-    #     common_files = set(a) & set(b)
-    #     unique_files = set(a) ^ set(b)
-    #
-    #     directories_to_visit += [d.relative_path for d in list(common_files) if d.type == FileType.DIR]
-    #
-    #     for f in common_files:
-    #         if f.type == FileType.REGULAR:
-    #             idx_src = a.index(f)
-    #             idx_dst = b.index(f)
-    #
-    #             tree.append(SyncAction(a[idx_src],b[idx_dst]))
-    #
-    #     for f in unique_files:
-    #         new_file_object = FileSystemObject(fullpath=None,
-    #                                            type=f.type,
-    #                                            size=None,
-    #                                            mtime=f.mtime,
-    #                                            hidden=f.hidden)
-    #
-    #         if (src.root in f.absolute_path):
-    #             new_file_object.fullpath = dest.new_path(f.relative_path)
-    #             x = f
-    #             y = new_file_object
-    #             dir = ActionDirection.SRC2DST
-    #         else:
-    #             new_file_object.fullpath = src.new_path(f.relative_path)
-    #             x = new_file_object
-    #             y = f
-    #             dir = ActionDirection.DST2SRC
-    #
-    #         action = ActionType.COPY if f.type == FileType.REGULAR else ActionType.MKDIR
-    #
-    #         if f.type == FileType.DIR:
-    #             directories_to_visit.append(f.relative_path)
-    #
-    #         tree.append(SyncAction(x,y,action,dir))
-
 
     results = filter_results(results)
     results_for_update(results)

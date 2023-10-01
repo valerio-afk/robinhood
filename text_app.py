@@ -1,3 +1,4 @@
+import os.path
 from typing import Dict,Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
@@ -11,8 +12,9 @@ from textual.widgets import Header, Footer, Static, Input, Button, Select, DataT
 from textual.widgets.data_table import Column
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration
-from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress
+from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
+from datetime import datetime
 
 _SyncMethodsPrefix:Dict[SyncMode,str] = {
     SyncMode.UPDATE: ">>",
@@ -138,6 +140,95 @@ class ComparisonSummary(Widget):
 
         return text
 
+class FileDetailsSummary(Widget):
+    COMPONENT_CLASSES: ClassVar[set[str]] = ComparisonSummary.COMPONENT_CLASSES
+
+    DEFAULT_CSS = """
+      FileDetailsSummary {
+          background: $accent;
+          color: $text;
+          height: 1;
+      }
+
+      FileDetailsSummary > .cs--key {
+          text-style: bold;
+          background: $accent-darken-2;
+      }
+      """
+
+    source_file:FileSystemObject = None
+    destination_file:FileSystemObject = None
+
+
+    @property
+    def has_pending_actions(this):
+        for _ in this.pending_actions:
+            return True
+
+        return False
+
+    def show(this, src_file:Union[FileSystemObject|None], dest_file:Union[FileSystemObject|None]):
+        this.source_file = src_file
+        this.destination_file = dest_file
+        this.refresh()
+
+
+    @property
+    def source_size(this) -> Union[int,None]:
+        return None if this.source_file is None else this.source_file.size
+
+    @property
+    def source_mtime(this) -> Union[datetime|None]:
+        return None if this.source_file is None else this.source_file.mtime
+
+    @property
+    def destination_size(this) -> Union[int,None]:
+        return None if this.source_file is None else this.source_file.size
+
+    @property
+    def destination_mtime(this) -> Union[datetime|None]:
+        return None if this.destination_file is None else this.destination_file.mtime
+
+    @property
+    def filename(this) -> Union[str|None]:
+        if (this.source_file is None) and (this.destination_file is None):
+            return None
+
+        fullpath = this.destination_file.fullpath if this.source_file is None else this.source_file.fullpath
+
+        _, filename = os.path.split(fullpath.absolute_path)
+
+        return filename
+
+
+    def render(this) -> RenderableType:
+
+        if (this.filename is None):
+            return Text("")
+
+        base_style = this.rich_style
+        text = Text(
+            style=this.rich_style,
+            no_wrap=True,
+            overflow="ellipsis",
+            justify="left",
+            end="",
+        )
+
+        key_style = this.get_component_rich_style("cs--key")
+        description_style = this.get_component_rich_style("cs--description")
+
+        local_size = sizeof_fmt(this.source_size) if this.source_size is not None else "-"
+        dest_size  = sizeof_fmt(this.destination_size) if this.destination_size is not None else "-"
+
+
+        text.append_text(Text.assemble((f" Filename", base_style + description_style), (this.filename,key_style)))
+        text.append_text(Text.assemble((f" Size (source)", base_style + description_style), (local_size, key_style)))
+        text.append_text(Text.assemble((f" Size (destination)", base_style + description_style), (dest_size, key_style)))
+
+
+        return text
+
 
 
 class RobinHoodTopBar(Container):
@@ -199,8 +290,10 @@ class RobinHood(App):
         this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
         this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
+        this._details_pane:FileDetailsSummary = FileDetailsSummary(id="file_details")
         this._progress_bar:ProgressBar = ProgressBar(id="synch_progbar")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
+
 
     def post_display_hook(this) -> None:
         this._tree_pane.adjust_column_sizes()
@@ -334,6 +427,15 @@ class RobinHood(App):
         this.query_one("#work_launcher").press()
 
 
+    @on(DataTable.RowSelected)
+    def on_row_selected(this, event:DataTable.RowSelected) -> None:
+        index = int(event.row_key.value)
+
+        action = this._tree_pane[index]
+
+        this._details_pane.show(action.a, action.b)
+
+
     @on(Button.Pressed,"#work_launcher")
     async def work_launcher_pressed(this,event:Button.Pressed) -> None:
         if this.is_working:
@@ -405,6 +507,7 @@ class RobinHood(App):
                 this._progress_bar,
                 id="summary_block"
             ),
+            this._details_pane,
             this._tree_pane,
             id="main_pane",
             classes="overlayable"
@@ -541,6 +644,17 @@ class FileTreeTable(DataTable):
 
         this.refresh()
 
+
+    def __getitem__(this, index:int):
+        if this.results is None:
+            raise IndexError()
+
+        res = this.results
+        if (not isinstance(res,list)):
+            res = [x for x in res]
+
+        return res[index]
+
     @property
     def results (this) -> Union[Iterable[SyncAction]|None]:
         return this._results
@@ -557,9 +671,9 @@ class FileTreeTable(DataTable):
 
         results = sorted(results,key=lambda x : str(x.a))
 
-        for x in results:
+        for i,x in enumerate(results):
             rendered_row = FileTreeTable._render_row(x)
-            this.add_row(*rendered_row)
+            this.add_row(*rendered_row,key=str(i))
 
 
         this.focus()
