@@ -222,9 +222,9 @@ class FileDetailsSummary(Widget):
         dest_size  = sizeof_fmt(this.destination_size) if this.destination_size is not None else "-"
 
 
-        text.append_text(Text.assemble((f" Filename", base_style + description_style), (this.filename,key_style)))
-        text.append_text(Text.assemble((f" Size (source)", base_style + description_style), (local_size, key_style)))
-        text.append_text(Text.assemble((f" Size (destination)", base_style + description_style), (dest_size, key_style)))
+        text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename,key_style)))
+        text.append_text(Text.assemble((f" Size (source) ", base_style + description_style), (local_size, key_style)))
+        text.append_text(Text.assemble((f" Size (destination) ", base_style + description_style), (dest_size, key_style)))
 
 
         return text
@@ -669,9 +669,9 @@ class FileTreeTable(DataTable):
             return None
 
 
-        results = sorted(results,key=lambda x : str(x.a))
+        this._results = sorted(this._results,key=lambda x : str(x.a))
 
-        for i,x in enumerate(results):
+        for i,x in enumerate(this._results):
             rendered_row = FileTreeTable._render_row(x)
             this.add_row(*rendered_row,key=str(i))
 
