@@ -53,6 +53,20 @@ Screen {
     padding-top:1;
 }
 
+#filter_list {
+    layer: above;
+    background: $surface;
+    width: 50%;
+    margin-top:1;
+    margin-bottom:1;
+    height: 100%;
+    dock:right;
+    color: auto;
+    display: none;
+    border: round $accent;
+    padding-top:1;
+}
+
 #remote_list DataTable {
     width: 100%;
     /*height: 100%;*/

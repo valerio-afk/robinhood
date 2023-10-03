@@ -2,24 +2,25 @@ import os.path
 from typing import Dict,Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
-from textual import on, work
+from textual import on, work, events
 from textual.app import App, Binding, Widget, ComposeResult
 from textual.suggester import Suggester
 from textual.worker import get_current_worker
 from textual.containers import Container, Horizontal, VerticalScroll, Vertical
 from textual.events import DescendantBlur
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
+from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea
 from textual.widgets.data_table import Column
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration
-from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
+from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
 
 _SyncMethodsPrefix:Dict[SyncMode,str] = {
     SyncMode.UPDATE: ">>",
     SyncMode.MIRROR: "->",
-    SyncMode.SYNC: "<>"
+    SyncMode.SYNC: "<>",
+    SyncMode.DEDUPE: "**"
 }
 
 SyncMethods:List[Tuple[str,SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x).split(".")[1].capitalize(), x) for x in SyncMode]
@@ -183,7 +184,7 @@ class FileDetailsSummary(Widget):
 
     @property
     def destination_size(this) -> Union[int,None]:
-        return None if this.source_file is None else this.source_file.size
+        return None if this.destination_file is None else this.destination_file.size
 
     @property
     def destination_mtime(this) -> Union[datetime|None]:
@@ -277,21 +278,50 @@ class RobinHoodRemoteList(Static):
             table.add_row(r[0],r[1]+NTPathManager.VOLUME_SEPARATOR+NTPathManager.PATH_SEPARATOR)
 
 
+class RobinHoodExcludePath(Static):
+    def __init__(this,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        this.border_title="Path to Exclude"
+
+
+    @property
+    def paths(this) -> Iterable[str]:
+        return RobinHoodConfiguration().exclusion_filters
+    def compose(this) -> ComposeResult:
+        yield TextArea()
+
+    @on(events.Show)
+    def show_filters(this) -> None:
+        textarea = this.query_one(TextArea)
+        textarea.load_text("\n".join(this.paths))
+
+    @on(events.Hide)
+    def save_filters(this) -> None:
+        textarea = this.query_one(TextArea)
+        new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
+
+        RobinHoodConfiguration().exclusion_filters = new_filters
+
+
+
 
 class RobinHood(App):
     CSS_PATH = "topbar.tcss"
     BINDINGS =  [
                 Binding("ctrl+c", "quit", "Quit", priority=True),
-                Binding("ctrl+r","show_remotes","Show Remote"),
+                Binding("ctrl+r","show_remotes","Toggle Remote"),
+                Binding("ctrl+p", "show_filters", "Toggle Path Filter List"),
+                Binding("ctrl+t", "switch_paths", "Switch Source/Destination Path"),
     ]
 
-    def __init__(this, *args, **kwargs): #(this, src=None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
+    def __init__(this, *args, **kwargs): #(this, src=   None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
         super().__init__(*args, **kwargs)
         this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
         this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
         this._details_pane:FileDetailsSummary = FileDetailsSummary(id="file_details")
         this._progress_bar:ProgressBar = ProgressBar(id="synch_progbar")
+        this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(id="filter_list")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
 
 
@@ -311,6 +341,7 @@ class RobinHood(App):
     def syncmethod_changed(this, event:Select.Changed) -> None:
         #this.syncmode = event.value
         this.query_one("#syncmethod SelectCurrent").remove_class("error")
+        this.query_one("#dest_text_area").disabled = event.value == SyncMode.DEDUPE
 
     @on(DescendantBlur,"Input")
     def on_blur_input(this, event:DescendantBlur) -> None:
@@ -353,9 +384,17 @@ class RobinHood(App):
     def src(this) -> str:
         return this.query_one("#source_text_area").value
 
+    @src.setter
+    def src(this,value:str) -> str:
+        this.query_one("#source_text_area").value = value
+
     @property
     def dst(this) -> str:
         return this.query_one("#dest_text_area").value
+
+    @dst.setter
+    def dst(this, value:str) -> str:
+        this.query_one("#dest_text_area").value = value
 
     @property
     def syncmode(this) -> SyncMode :
@@ -426,9 +465,12 @@ class RobinHood(App):
         this._tree_pane.show_results(None)
         this.query_one("#work_launcher").press()
 
+    def action_switch_paths(this) -> None:
+        this.src, this.dst = this.dst, this.src
 
-    @on(DataTable.RowSelected)
-    def on_row_selected(this, event:DataTable.RowSelected) -> None:
+
+    @on(DataTable.RowHighlighted)
+    def on_row_selected(this, event:DataTable.RowHighlighted) -> None:
         index = int(event.row_key.value)
 
         action = this._tree_pane[index]
@@ -453,12 +495,19 @@ class RobinHood(App):
                 this.bell()
                 return
 
-            if not (this._validate_dir_inputs(this.query_one("#source_text_area")) and this._validate_dir_inputs(this.query_one("#dest_text_area"))):
+            if not this._validate_dir_inputs(this.query_one("#source_text_area")) :
+                return
+
+            if  (this.syncmode == SyncMode.DEDUPE) and  (not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
                 return
 
             match this.syncmode:
                 case SyncMode.UPDATE:
-                    this._run_update()#,name="comparison", exclusive=True)
+                    this._run_update()
+                case SyncMode.MIRROR:
+                    this._run_mirror()
+                case SyncMode.DEDUPE:
+                    this._run_dedupe()
                 case _:
                     raise NotImplementedError("Sync mode not implemented yet!")
 
@@ -467,7 +516,17 @@ class RobinHood(App):
 
     @work(exclusive=True,name="comparison",thread=True)
     def _run_update(this) -> None:
-        result = compare_tree(this.src, this.dst, this._backend)
+        result = compare_tree(this.src, this.dst, mode=SyncMode.UPDATE, eventhandler=this._backend)
+        this.show_results(result)
+
+    @work(exclusive=True,name="comparison",thread=True)
+    def _run_mirror(this) -> None:
+        result = compare_tree(this.src, this.dst, mode=SyncMode.MIRROR, eventhandler=this._backend)
+        this.show_results(result)
+
+    @work(exclusive=True, name="comparison", thread=True)
+    def _run_dedupe(this) -> None:
+        result = find_dedupe(this.src, this._backend)
         this.show_results(result)
 
     @work(exclusive=True,name="synching",thread=True)
@@ -513,19 +572,24 @@ class RobinHood(App):
             classes="overlayable"
         )
         yield this._remote_list_overlay
+        yield this._filter_list
         yield Footer()
 
     def action_show_remotes(this) -> None:
-        match(this._remote_list_overlay.styles.display):
+        this.toggle_overlay(this._remote_list_overlay)
+
+    def action_show_filters(this) -> None:
+        this.toggle_overlay(this._filter_list)
+    def toggle_overlay(this,overlay:Widget) -> None:
+        match(overlay.styles.display):
             case "none":
-                this._remote_list_overlay.styles.display = "block"
+                overlay.styles.display = "block"
 
                 for itm in this.query(".overlayable"):
                     itm.disabled=True
 
-                #this._remote_list_overlay.focus()
             case _:
-                this._remote_list_overlay.styles.display = "none"
+                overlay.styles.display = "none"
                 for itm in this.query(".overlayable"):
                     itm.disabled = False
 
@@ -696,21 +760,64 @@ class FileTreeTable(DataTable):
             ...
 
 
+    def on_key(this,event:events.Key):
+
+        action = this._results[this.cursor_row]
+
+        if (action is not None):
+            match event.name:
+                case "space":
+                    action.action_type = ActionType.NOTHING
+                    this.update_action(action)
+                case "right" | "left":
+                    src2dst = event.name == "right"
+                    if (action.action_type != ActionType.COPY):
+
+                        action.direction = ActionDirection.SRC2DST if src2dst else ActionDirection.DST2SRC
+
+                        if action.get_one_path.type == FileType.DIR:
+                            action.action_type = ActionType.MKDIR
+                        else:
+                            action.action_type = ActionType.UPDATE if (src2dst and (action.a.exists)) or \
+                                                                      (not src2dst and (action.b.exists))  \
+                                                                   else ActionType.COPY
+                    else:
+                        if src2dst and (not action.b.exists):
+                            action.action_type = ActionType.COPY
+                            action.direction = ActionDirection.SRC2DST
+                        elif not src2dst and (not action.a.exists):
+                            action.action_type = ActionType.COPY
+                            action.direction = ActionDirection.DST2SRC
+                        else:
+                            action.action_type = ActionType.NOTHING
+
+
+            this.update_action(action)
+            this.app.query_one("#summary").refresh()
+            this.app._update_job_related_interface()
+
 
     @classmethod
     def _render_row(cls,x:SyncAction):
         match x.action_type:
             case ActionType.MKDIR | ActionType.COPY:
-                dir_frm = frm = "[green]"
+                dir_frm = frm_src = frm_dest = "[green]"
             case ActionType.UPDATE:
-                dir_frm = frm = "[bright_green]"
+                dir_frm = frm_src = frm_dest = "[bright_green]"
             case ActionType.DELETE:
-                frm = '[s magenta]'
+                frm_src = '[magenta]'
+                frm_dest = '[s magenta]'
                 dir_frm = "[magenta]"
-            case _:
-                dir_frm = frm = "[grey]"
+            case ActionType.UNKNOWN:
+                dir_frm = frm_src = frm_dest = "[yellow]"
 
-        direction = "-" if x.action_type == ActionType.NOTHING else x.direction.value
+            case _:
+                dir_frm = frm_src = frm_dest = "[grey]"
+
+        match x.action_type:
+            case ActionType.NOTHING: direction = "-"
+            case ActionType.UNKNOWN: direction = "?"
+            case _: direction = x.direction.value
 
         src = ""
         dst = ""
@@ -718,16 +825,23 @@ class FileTreeTable(DataTable):
         icon_src = ""
         icon_dst = ""
 
-        if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
+        #if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
+        if x.a is not None:
             icon_src = ":open_file_folder:" if x.a.type == FileType.DIR else ":page_facing_up:"
             src = x.a.relative_path
 
-        if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
+        #if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
+        if x.b is not None:
             icon_dst = ":open_file_folder:" if x.b.type == FileType.DIR else ":page_facing_up:"
             dst = x.b.relative_path
 
-        src_column = Text.from_markup(f"{frm}{icon_src}{src}[/]")
-        dst_column = Text.from_markup(f"{frm}{icon_dst}{dst}[/]")
+
+        if x.direction == ActionDirection.DST2SRC:
+            frm_src, frm_dest = frm_dest, frm_src
+
+
+        src_column = Text.from_markup(f"{frm_src}{icon_src}{src}[/]")
+        dst_column = Text.from_markup(f"{frm_dest}{icon_dst}{dst}[/]")
 
         src_column.overflow = dst_column.overflow = "ellipsis"
         src_column.no_wrap = dst_column.no_wrap = True

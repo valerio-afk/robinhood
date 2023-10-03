@@ -227,18 +227,18 @@ class FileSystemObject:
         this.processed=False
 
     @property
-    def absolute_path(this):
+    def absolute_path(this) -> str:
         return this.fullpath.absolute_path
 
     @property
-    def relative_path(this):
+    def relative_path(this) -> str:
         return this.fullpath.relative_path
 
     @property
-    def containing_directory(this):
+    def containing_directory(this) -> str:
         return os.path.split(this.absolute_path)[0]
 
-    def __eq__(this,other):
+    def __eq__(this,other) -> bool:
         if type(other) == str:
             return (this.absolute_path==other) or (this.relative_path == other)
         elif isinstance(other,FileSystemObject):
@@ -288,6 +288,12 @@ class FileSystemObject:
         output = subprocess.run(['rclone','lsf',this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
         return output.returncode == 0
+
+    def get_new_size(this) -> int:
+        this._size = None
+        this._size = this.size
+
+        return this._size
 
 class PathException(Exception):
     ...

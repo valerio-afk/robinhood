@@ -2,7 +2,7 @@ from typing import Union,List, Iterable, Callable, Dict, Tuple, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from enum import Enum
-from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir, convert_to_bytes
+from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir, convert_to_bytes, LocalFileSystem
 from file_filters import UnixPatternExpasionFilter,RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
@@ -68,6 +68,7 @@ class SyncMode(Enum):
     UPDATE:int = 0
     MIRROR:int = 1
     SYNC:int = 2
+    DEDUPE:int = 3
 
 class ActionType(Enum):
     NOTHING:int=0
@@ -162,7 +163,7 @@ class SyncAction:
                  a:FileSystemObject,
                  b:FileSystemObject,
                  action_type:ActionType=ActionType.NOTHING,
-                 direction:Union[SyncMode|None]=None,
+                 direction:Union[ActionDirection|None]=None,
                  timeout = 60
                  ):
         this.a=a
@@ -222,7 +223,8 @@ class SyncAction:
                 y = this.b.containing_directory
 
                 if (this.direction == ActionDirection.DST2SRC):
-                    x,y=y,x
+                    x = this.b.absolute_path
+                    y = this.a.containing_directory
 
                 this._status = SyncStatus.IN_PROGRESS
                 copy(x,y,show_progress=show_progress,listener=_update_internal_status)
@@ -243,7 +245,7 @@ class SyncAction:
             case ActionType.MKDIR:
                 success = y.exists
             case ActionType.UPDATE | ActionType.COPY:
-                success = (y.exists) and (x.size == y.size)
+                success = (y.exists) and (x.get_new_size() == y.get_new_size())
             case ActionType.DELETE:
                 success = not y.exists
             case _:
@@ -282,9 +284,75 @@ class RobinHoodBackend(ABC):
     def after_synching(this, event:SyncEvent) -> None:
         ...
 
+def find_dedupe(path:Union[str|FileSystem],
+                 eventhandler:[SyncEvent|None]=None
+                 )->Iterable[SyncAction]:
+
+    _trigger = _get_trigger_fn(eventhandler)
+
+    _trigger("before_comparing", SyncEvent(path))
+
+    if (type(path) == str):
+        fs=fs_auto_determine(path,True)
+        fs.cached=True
+
+    fs.load()
+
+    cmdline_args = ['rclone', 'dedupe', fs.root, '--dedupe-mode', 'list']
+
+    if (isinstance(fs,LocalFileSystem)):
+        cmdline_args.append("--by-hash")
+
+    report = subprocess.run(cmdline_args,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+
+    actions = []
+
+    if (report.returncode==0):
+        stdout = report.stdout.decode().splitlines()
+
+        dedupes = {}
+
+        i = 0
+
+        while (i<len(stdout)):
+            line = stdout[i]
+
+            match = re.match(r"([0-9a-fA-F]+): ([\d]+) duplicates", line)
+
+            if match is not None:
+                hash = match[1]
+                n = int(match[2])
+
+                files = []
+
+                for j in range(1,n+1):
+                    tokens = stdout[i+j].split(",")
+                    files.append(tokens[-1].strip())
+
+                i += n
+                dedupes[hash] = files[::-1] #for some reason, what it seems to be the original file is the last
+
+            i+=1
+
+
+        for hashes, files in dedupes.items():
+
+            orig = fs.new_path(files[0])
+
+            for dup in files[1:]:
+                duplicate_filepath = fs.new_path(dup)
+                a = fs.get_file(orig)
+                b = fs.get_file(duplicate_filepath)
+
+                actions.append(SyncAction(a,b,ActionType.DELETE,ActionDirection.SRC2DST))
+
+        _trigger("after_comparing", SyncEvent(actions))
+
+    return actions
 
 def compare_tree(src:Union[str|FileSystem],
                  dest:Union[str|FileSystem],
+                 mode:SyncMode.UPDATE,
                  eventhandler:[SyncEvent|None]=None
                  )->Iterable[SyncAction]:
 
@@ -374,7 +442,10 @@ def compare_tree(src:Union[str|FileSystem],
         results.append(SyncAction(source_object, dest_object, action, direction))
 
     results = filter_results(results)
-    results_for_update(results)
+
+    match mode:
+        case SyncMode.UPDATE: results_for_update(results)
+        case SyncMode.MIRROR: results_for_mirror(results)
 
     _trigger("after_comparing",SyncEvent(results))
 
@@ -437,3 +508,25 @@ def results_for_update(results:Iterable[SyncAction]) -> None:
                                 action.action_type = ActionType.UPDATE
                             case FileType.DIR:
                                 action.action_type = ActionType.MKDIR
+                    else:
+                        action.action_type = ActionType.UNKNOWN
+
+def results_for_mirror(results:Iterable[SyncAction]) -> None:
+    for action in results:
+        src = action.a
+        dest = action.b
+
+
+        if (action.direction == ActionDirection.DST2SRC) or ((src is not None) and (dest is not None)):
+            if (src.size != dest.size):
+                action.direction = ActionDirection.SRC2DST
+
+                if (not src.exists):
+                    action.action_type = ActionType.DELETE
+                else:
+                    match src.type:
+                        case FileType.REGULAR:
+                            action.action_type = ActionType.UPDATE
+                        case FileType.DIR:
+                            action.action_type = ActionType.MKDIR
+
