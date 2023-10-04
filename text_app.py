@@ -109,9 +109,9 @@ class ComparisonSummary(Widget):
 
             if (action == ActionType.DELETE):
                 match r.direction:
-                    case ActionDirection.SRC2DST:
-                        delete_source += r.a.size
                     case ActionDirection.DST2SRC:
+                        delete_source += r.a.size
+                    case ActionDirection.SRC2DST:
                         delete_target += r.b.size
 
         return (upload, download, delete_source, delete_target)
@@ -339,9 +339,9 @@ class RobinHood(App):
 
     @on(Select.Changed, "#syncmethod")
     def syncmethod_changed(this, event:Select.Changed) -> None:
-        #this.syncmode = event.value
         this.query_one("#syncmethod SelectCurrent").remove_class("error")
-        this.query_one("#dest_text_area").disabled = event.value == SyncMode.DEDUPE
+
+        this._update_job_related_interface()
 
     @on(DescendantBlur,"Input")
     def on_blur_input(this, event:DescendantBlur) -> None:
@@ -449,6 +449,8 @@ class RobinHood(App):
             for x in enablable:
                 x.disabled = False
 
+            this.query_one("#dest_text_area").disabled = this.syncmode == SyncMode.DEDUPE
+
             this.show_progressbar = False
         else:
             button.variant = "error"
@@ -467,6 +469,11 @@ class RobinHood(App):
 
     def action_switch_paths(this) -> None:
         this.src, this.dst = this.dst, this.src
+
+
+    @on(events.Ready)
+    def prova(this):
+        this._update_job_related_interface()
 
 
     @on(DataTable.RowHighlighted)
@@ -498,7 +505,7 @@ class RobinHood(App):
             if not this._validate_dir_inputs(this.query_one("#source_text_area")) :
                 return
 
-            if  (this.syncmode == SyncMode.DEDUPE) and  (not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
+            if  (this.syncmode != SyncMode.DEDUPE) and  (not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
                 return
 
             match this.syncmode:
@@ -771,6 +778,7 @@ class FileTreeTable(DataTable):
                     this.update_action(action)
                 case "right" | "left":
                     src2dst = event.name == "right"
+                    #TODO: fix this to accommodate delete
                     if (action.action_type != ActionType.COPY):
 
                         action.direction = ActionDirection.SRC2DST if src2dst else ActionDirection.DST2SRC
@@ -790,6 +798,11 @@ class FileTreeTable(DataTable):
                             action.direction = ActionDirection.DST2SRC
                         else:
                             action.action_type = ActionType.NOTHING
+                case "delete":
+                    action.action_type = ActionType.DELETE
+                    if action.direction is None:
+                        action.direction = ActionDirection.SRC2DST
+
 
 
             this.update_action(action)
