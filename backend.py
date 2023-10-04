@@ -1,11 +1,12 @@
 from typing import Union,List, Iterable, Callable, Dict, Tuple, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
-from enum import Enum
+from enums import SyncMode, SyncStatus, ActionType, ActionDirection
 from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir, convert_to_bytes, LocalFileSystem
 from file_filters import UnixPatternExpasionFilter,RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
+from config import RobinHoodConfiguration
 import subprocess
 import re
 import rclone_python
@@ -64,19 +65,7 @@ def improved_extract_rclone_progress(buffer: str) -> Tuple[bool, Union[Dict[str,
 
 rclone_python.rclone.utils.extract_rclone_progress = improved_extract_rclone_progress
 
-class SyncMode(Enum):
-    UPDATE:int = 0
-    MIRROR:int = 1
-    SYNC:int = 2
-    DEDUPE:int = 3
 
-class ActionType(Enum):
-    NOTHING:int=0
-    MKDIR:int=1
-    COPY:int=2
-    UPDATE:int=3
-    DELETE:int=4
-    UNKNOWN:int=5
 
 @dataclass(frozen=True)
 class SyncProgress():
@@ -99,40 +88,15 @@ class SyncProgress():
     def bytes_total(this):
         return convert_to_bytes(this.total_bits, this.unit_total)
 
-class RobinHoodConfiguration:
-    source_path: Union[str|None]=None
-    destination_path: Union[str|None]=None
-    exclusion_filters:Union[List[str] | None] = None
-    deep_comparisons:bool = False
-    exclude_hidden_files:bool = False
-    sync_mode:SyncMode = SyncMode.UPDATE
-
-    def __new__(cls):
-        if not hasattr(cls, 'instance'):
-            cls.instance = super(RobinHoodConfiguration, cls).__new__(cls)
-
-        return cls.instance
 
 
-class ActionDirection(Enum):
-    SRC2DST:str = '>'
-    DST2SRC:str = '<'
-
-    def __str__(this) ->str:
-        return this.value
-
-
-class SyncStatus(Enum):
-    NOT_STARTED : int = 0
-    IN_PROGRESS : int = 1
-    SUCCESS     : int = 2
-    FAILED      : int = 3
-    INTERRUPTED : int = 4
 
 class SyncEvent:
 
-    def __init__(this, value=None):
+    def __init__(this, value:Any=None,*,processed:Union[int|None]=None,total:Union[int|None]=None):
         this.value = value
+        this.processed = processed
+        this.total = total
 
 
 class SyncComparisonEvent(SyncEvent):
@@ -238,6 +202,9 @@ class SyncAction:
         x = this.a
         y = this.b
 
+        x.update_information()
+        y.update_information()
+
         if (this.direction == ActionDirection.DST2SRC):
             x, y = y, x
 
@@ -245,7 +212,7 @@ class SyncAction:
             case ActionType.MKDIR:
                 success = y.exists
             case ActionType.UPDATE | ActionType.COPY:
-                success = (y.exists) and (x.get_new_size() == y.get_new_size())
+                success = y.exists and (x.size == y.size)
             case ActionType.DELETE:
                 success = not y.exists
             case _:
@@ -379,10 +346,11 @@ def compare_tree(src:Union[str|FileSystem],
     report = subprocess.run(['rclone', 'check', src.root, dest.root, '--combined', '-'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
     results = []
+    files  = report.stdout.decode().splitlines()
 
-    for line in report.stdout.decode().splitlines():
+    for i,line in enumerate(files):
         action, path = line.split(" ", maxsplit=1)
-        _trigger("on_comparing", SyncEvent(path))
+        _trigger("on_comparing", SyncEvent(path,processed=i+1,total=len(files)))
 
         src_path  = src.new_path(path)
         dest_path = dest.new_path(path)
@@ -411,6 +379,7 @@ def compare_tree(src:Union[str|FileSystem],
                                                type=source_object.type,
                                                size=None,
                                                mtime=None,
+                                               exists=False,
                                                hidden=source_object.hidden)
 
                 action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
@@ -420,6 +389,7 @@ def compare_tree(src:Union[str|FileSystem],
                                                type=dest_object.type,
                                                size=None,
                                                mtime=None,
+                                               exists=False,
                                                hidden=dest_object.hidden)
 
                 action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR

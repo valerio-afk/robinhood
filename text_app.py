@@ -176,7 +176,10 @@ class FileDetailsSummary(Widget):
 
     @property
     def source_size(this) -> Union[int,None]:
-        return None if this.source_file is None else this.source_file.size
+        return None if (this.source_file is None) \
+                       or (this.source_file.size is None) or \
+                       (this.source_file.size < 0) \
+            else this.source_file.size
 
     @property
     def source_mtime(this) -> Union[datetime|None]:
@@ -184,7 +187,10 @@ class FileDetailsSummary(Widget):
 
     @property
     def destination_size(this) -> Union[int,None]:
-        return None if this.destination_file is None else this.destination_file.size
+        return None if (this.destination_file is None) \
+                       or (this.destination_file.size is None) or \
+                       (this.destination_file.size<0) \
+            else this.destination_file.size
 
     @property
     def destination_mtime(this) -> Union[datetime|None]:
@@ -219,8 +225,11 @@ class FileDetailsSummary(Widget):
         key_style = this.get_component_rich_style("cs--key")
         description_style = this.get_component_rich_style("cs--description")
 
-        local_size = sizeof_fmt(this.source_size) if this.source_size is not None else "-"
-        dest_size  = sizeof_fmt(this.destination_size) if this.destination_size is not None else "-"
+        def _show_formatted_size(x:Union[FileSystemObject|None]):
+            return sizeof_fmt(x) if x is not None else "-"
+
+        local_size = _show_formatted_size(this.source_size)
+        dest_size  = _show_formatted_size(this.destination_size)
 
 
         text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename,key_style)))
@@ -456,7 +465,7 @@ class RobinHood(App):
             button.variant = "error"
             button.label = "Stop"
 
-            if (this.is_synching):
+            if (this.is_working):
                 this.show_progressbar = True
 
             for x in enablable:
@@ -541,10 +550,12 @@ class RobinHood(App):
         apply_changes(this._tree_pane.results,this._backend)
 
 
-    def update_progressbar(this, update:SyncProgress):
-        this._progress_bar.update(total=update.bytes_total,
-                                  progress=update.bytes_transferred
-                                  )
+    def update_progressbar(this, update:Union[SyncProgress|SyncEvent]):
+        if isinstance(update,SyncProgress):
+            this._progress_bar.update(total=update.bytes_total,progress=update.bytes_transferred)
+        elif isinstance(update,SyncEvent):
+            this._progress_bar.update(total=update.total,progress=update.processed)
+
 
 
     def show_results(this,results:Union[Iterable[SyncAction]|None]) -> None:
@@ -613,7 +624,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def update_status(this,text:str)->None:
         this._gui.call_from_thread(this._gui.set_status,text)
 
-    def update_progressbar(this, update:SyncProgress):
+    def update_progressbar(this, update:[SyncProgress|SyncEvent]):
         this._gui.call_from_thread(this._gui.update_progressbar, update)
 
 
@@ -637,6 +648,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def on_comparing(this, event:SyncEvent) -> None:
         this._check_running_status()
         this.update_status(f"Analysing [underline yellow]{event.value}[/]")
+        this.update_progressbar(event)
 
 
     def after_comparing(this, event:SyncEvent) -> None:
@@ -691,27 +703,48 @@ class FileTreeTable(DataTable):
 
         super().__init__(*args,**kwargs)
 
-        this.add_column("Source Directories",key="src",width=45)
-        this.add_column("Action",key="action",width=10)
-        this.add_column("Destination Directories",key="dst",width=45)
+        this.add_column(Text.from_markup("Source Directories",overflow="ellipsis"),key="src",width=45)
+        this.add_column(Text.from_markup("Action",overflow="ellipsis"),key="action",width=7)
+        this.add_column(Text.from_markup("Destination Directories",overflow="ellipsis"),key="dst",width=45)
 
         this._results = None
 
     def adjust_column_sizes(this) -> None:
-        size = this.size
-        psize = this.parent.size[0]
+        psize = this.size.width-6
+        #psize = this.parent.size[0]
 
         tot_size=0
 
-        if all([c for c in size]):
+        columns = list(this.columns.values())
 
-            for c in this.columns.values():
-                c.auto_width = False
-                if (not hasattr(c, "percentage_width") or (c.percentage_width is None)):
-                    c.percentage_width = c.width
 
-                c.width = int( psize * (c.percentage_width / 100))
-                tot_size += c.width
+        #if all([c for c in size]):
+
+        for c in columns:
+            c.auto_width = False
+            if (not hasattr(c, "percentage_width") or (c.percentage_width is None)):
+                c.percentage_width = c.width
+
+            c.width = int( psize * (c.percentage_width / 100))
+            tot_size += c.width
+
+        if tot_size != psize:
+            delta = psize - tot_size
+
+            unit = 1 if delta>0 else -1
+
+            if (delta<0):
+                delta*=-1
+
+            i = 0
+
+            while delta>0:
+                columns[i%len(columns)].width += unit
+                i+=1
+                delta-=1
+
+
+
 
         this.refresh()
 
@@ -776,32 +809,76 @@ class FileTreeTable(DataTable):
                 case "space":
                     action.action_type = ActionType.NOTHING
                     this.update_action(action)
-                case "right" | "left":
-                    src2dst = event.name == "right"
-                    #TODO: fix this to accommodate delete
-                    if (action.action_type != ActionType.COPY):
-
-                        action.direction = ActionDirection.SRC2DST if src2dst else ActionDirection.DST2SRC
-
-                        if action.get_one_path.type == FileType.DIR:
-                            action.action_type = ActionType.MKDIR
-                        else:
-                            action.action_type = ActionType.UPDATE if (src2dst and (action.a.exists)) or \
-                                                                      (not src2dst and (action.b.exists))  \
-                                                                   else ActionType.COPY
-                    else:
-                        if src2dst and (not action.b.exists):
-                            action.action_type = ActionType.COPY
+                case "right":
+                    if action.action_type == ActionType.NOTHING:
+                        if (action.a is not None) and action.a.exists:
                             action.direction = ActionDirection.SRC2DST
-                        elif not src2dst and (not action.a.exists):
-                            action.action_type = ActionType.COPY
+                            if action.a.type == FileType.DIR:
+                                action.action_type = ActionType.MKDIR
+                            else:
+                                action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
+                    elif action.direction != ActionDirection.SRC2DST:
+                        if (action.action_type == ActionType.UPDATE) or \
+                           ((action.action_type == ActionType.DELETE) and (action.b.exists)) or \
+                           (action.action_type == ActionType.MKDIR):
+                            action.direction = ActionDirection.SRC2DST
+                        else:
+                            action.action_type = ActionType.NOTHING
+                case "left":
+                    if action.action_type == ActionType.NOTHING:
+                        if (action.b is not None) and action.b.exists:
+                            action.direction = ActionDirection.DST2SRC
+                            if action.b.type == FileType.DIR:
+                                action.action_type = ActionType.MKDIR
+                            else:
+                                action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
+                    elif action.direction != ActionDirection.DST2SRC:
+                        if (action.action_type == ActionType.UPDATE) or \
+                           ((action.action_type == ActionType.DELETE) and (action.a.exists)) or \
+                           (action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.DST2SRC
                         else:
                             action.action_type = ActionType.NOTHING
+
+
+
+
+                # case "right" | "left":
+                #     src2dst = event.name == "right"
+                #     #TODO: fix this to accommodate delete
+                #     if (action.action_type != ActionType.COPY):
+                #
+                #         action.direction = ActionDirection.SRC2DST if src2dst else ActionDirection.DST2SRC
+                #
+                #         if action.get_one_path.type == FileType.DIR:
+                #             action.action_type = ActionType.MKDIR
+                #         else:
+                #             action.action_type = ActionType.UPDATE if (src2dst and (action.a.exists)) or \
+                #                                                       (not src2dst and (action.b.exists))  \
+                #                                                    else ActionType.COPY
+                #     else:
+                #         if src2dst and (not action.b.exists):
+                #             action.action_type = ActionType.COPY
+                #             action.direction = ActionDirection.SRC2DST
+                #         elif not src2dst and (not action.a.exists):
+                #             action.action_type = ActionType.COPY
+                #             action.direction = ActionDirection.DST2SRC
+                #         else:
+                #             action.action_type = ActionType.NOTHING
                 case "delete":
                     action.action_type = ActionType.DELETE
+
                     if action.direction is None:
                         action.direction = ActionDirection.SRC2DST
+
+                    match action.direction:
+                        case ActionDirection.SRC2DST:
+                            if not action.b.exists:
+                                action.direction = ActionDirection.DST2SRC
+
+                        case ActionDirection.DST2SRC:
+                            if not action.a.exists:
+                                action.direction = ActionDirection.SRC2DST
 
 
 
@@ -838,15 +915,22 @@ class FileTreeTable(DataTable):
         icon_src = ""
         icon_dst = ""
 
+        def _make_suitable_icon(x:FileSystemObject):
+            if x.exists:
+                return ":open_file_folder:" if x.type == FileType.DIR else ":page_facing_up:"
+            else:
+                return ":white_medium_star:[i]"
+
         #if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
         if x.a is not None:
-            icon_src = ":open_file_folder:" if x.a.type == FileType.DIR else ":page_facing_up:"
+            icon_src = _make_suitable_icon(x.a)
             src = x.a.relative_path
 
         #if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
         if x.b is not None:
-            icon_dst = ":open_file_folder:" if x.b.type == FileType.DIR else ":page_facing_up:"
+            icon_dst = _make_suitable_icon(x.b)
             dst = x.b.relative_path
+
 
 
         if x.direction == ActionDirection.DST2SRC:

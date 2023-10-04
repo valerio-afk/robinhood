@@ -1,3 +1,4 @@
 rclone-python==0.1.11
 textual==0.38.1
 psutil==5.9.5
+platformdirs==3.11.0

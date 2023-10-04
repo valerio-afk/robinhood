@@ -4,7 +4,8 @@ from rich.console import Console
 from rich.table import  Table
 from filesystem import get_rclone_remotes
 from text_app import RobinHood
-from backend import RobinHoodConfiguration, SyncMode
+from backend import SyncMode
+from config import RobinHoodConfiguration
 
 
 
@@ -34,24 +35,27 @@ def make_configuration(args:Namespace) -> RobinHoodConfiguration:
     config.exclude_hidden_files = args.exclude_hidden
 
     return config
-def action_update(args:Namespace):
+def action_update(args:Namespace) -> None:
     config = make_configuration(args)
     config.sync_mode = SyncMode.UPDATE
 
     load_interactive()
 
 
-def action_mirror(args:Namespace):
+def action_mirror(args:Namespace) -> None:
     config = make_configuration(args)
     config.sync_mode = SyncMode.MIRROR
 
     load_interactive()
 
-def action_dedupe(args:Namespace):
+def action_dedupe(args:Namespace) -> None:
     config = make_configuration(args)
     config.sync_mode = SyncMode.DEDUPE
 
     load_interactive()
+
+def action_profiles(args:Namespace) -> None:
+    print(args)
 
 def load_interactive() -> None:
     app = RobinHood()
@@ -69,10 +73,10 @@ def load_interactive() -> None:
 
 
 def add_sync_args(parser:ArgumentParser, include_remote:bool = True)->None:
-    parser.add_argument("local", type=str, help="Local path")
+    parser.add_argument("local", type=str, help="Local path", nargs="?")
 
     if include_remote:
-        parser.add_argument("remote", type=str, help="Remote path")
+        parser.add_argument("remote", type=str, help="Remote path", nargs="?")
 
     parser.add_argument("-d", "--deep", action="store_true",dest="deep", help="Matches file hash")
     parser.add_argument("-e", "--exclude", metavar="EXPR", dest="exclude", nargs="*", type=str, default=[],
@@ -90,6 +94,14 @@ def main()->None:
 
     parser_remotes = subparsers.add_parser("remotes",help="Get list of rclone remotes")
     parser_remotes.set_defaults(func=rclone_remotes)
+
+    parser_profile = subparsers.add_parser("profile", help="Create a user profile")
+    parser_profile.add_argument("-l","--list",action='store_true',dest="list",help="List all profiles")
+    parser_profile.add_argument("-c", "--create", metavar="NAME", type=str, dest="create", help="Create a new profile")
+    parser_profile.add_argument("-r", "--remove", metavar="NAME", type=str, dest="remove", help="Remove a profile")
+    add_sync_args(parser_profile)
+
+    parser_remotes.set_defaults(func=action_profiles)
 
     parser_update = subparsers.add_parser("update", help="Update remote folder with new content in local (only remote is changed)")
     add_sync_args(parser_update)

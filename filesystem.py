@@ -2,16 +2,18 @@ from typing import Any, Union
 from abc import ABC, abstractmethod
 from enum import Enum
 from rclone_python import rclone
-from datetime import datetime
+from datetime import datetime,timezone
 from copy import copy
 from psutil import disk_partitions
 import os
 import re
 import stat
 import subprocess
+import json
 
 
 is_windows = lambda : os.name =='nt'
+current_timezone = lambda : datetime.now().astimezone().tzinfo
 
 UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
 
@@ -218,12 +220,15 @@ class FileSystemObject:
                  type:FileType,
                  size:Union[int|None],
                  mtime:Union[datetime|None],
+                 exists:Union[bool|None]=None,
                  hidden:bool=False):
         this.fullpath=fullpath
         this.type=type
         this._size=size
+        this._mtime=None
         this.mtime=mtime
         this.hidden=hidden
+        this._exists = exists
         this.processed=False
 
     @property
@@ -237,6 +242,10 @@ class FileSystemObject:
     @property
     def containing_directory(this) -> str:
         return os.path.split(this.absolute_path)[0]
+
+    @property
+    def filename(this) -> str:
+        return os.path.split(this.absolute_path)[1]
 
     def __eq__(this,other) -> bool:
         if type(other) == str:
@@ -268,32 +277,48 @@ class FileSystemObject:
 
     @property
     def size(this) -> int:
-        if (this._size is not None):
-            return this._size
-
-        output = subprocess.run(['rclone', 'size', this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-
-        if output.returncode != 0:
-            return -1
-
-        report = output.stdout.decode()
-        matches = re.findall(r"\((\d+) \w+\)",report)
-
-        if (len(matches)==0):
-            return -1
-
-        return int(matches.pop())
-    @property
-    def exists(this) -> bool:
-        output = subprocess.run(['rclone','lsf',this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-
-        return output.returncode == 0
-
-    def get_new_size(this) -> int:
-        this._size = None
-        this._size = this.size
+        if (this._size is None) or (this._size<0):
+            this.update_information()
 
         return this._size
+
+    @property
+    def exists(this) -> bool:
+        if this._exists is None:
+            output = subprocess.run(['rclone','lsf',this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+
+            return output.returncode == 0
+        else:
+            return this._exists
+
+    @property
+    def mtime(this) -> Union[datetime|None]:
+        return this._mtime
+
+    @mtime.setter
+    def mtime(this, mtime: Union[datetime|None]) -> None:
+        this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(tzinfo=current_timezone())
+
+
+
+    def update_information(this):
+        output = subprocess.run(['rclone', 'lsjson', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        if output.returncode == 0:
+            file_stats = json.loads(output.stdout.decode())
+
+            for s in file_stats:
+                if s['Name'] == this.filename:
+                    this._size = s['Size']
+                    this.mtime = _fix_isotime(s['ModTime'])
+                    this._exists = True
+
+                    return
+
+        this._exists = False
+
+
+
 
 class PathException(Exception):
     ...
@@ -432,6 +457,7 @@ class FileSystem(ABC):
         this._cache:Any = []
         this._path_manager = path_manager
         this._cached=cached
+        this._file_objects = {}
 
         if (not force) and (not this.exists(this.root)):
             raise FileNotFoundError(this.root)
@@ -442,8 +468,17 @@ class FileSystem(ABC):
     def __repr__(this) -> str:
         return str(this)
 
-    # def add_filter_callback(this,fn):
-    #     this.filter_callback.append(fn)
+    def update_file_object(this,path:PathManager,fo:Union[FileSystemObject|None]):
+        p = path.relative_path
+        if fo is None:
+            if p in this._file_objects.keys():
+                del this._file_objects[p]
+        else:
+            this._file_objects[p] = fo
+
+    def get_file_object(this,path:PathManager) -> Union[FileSystemObject|None]:
+        p = path.relative_path
+        return this._file_objects[p] if p in this._file_objects.keys() else None
 
     @property
     def cached(this) -> bool:
@@ -579,18 +614,13 @@ class LocalFileSystem(FileSystem):
         return this._make_local_filesystem_object(name,p)
 
     def _make_local_filesystem_object(this,filename:str, path:str) -> FileSystemObject:
-        # if path.endswith('/'):
-        #     path = path[:-1]
-        #
-        # if (root is not None) and root.endswith('/'):
-        #     root = root[:-1]
-        #
-        # fullpath = "/".join([path, filename])
-        #
-        # if (fullpath.startswith('/')):
-        #     fullpath = root + "/" + fullpath[1:]
-
         fullpath = this.new_path(PathManager.join(path,filename),root=this.root)
+
+        if (this.cached):
+            cached_fso = this.get_file_object(fullpath)
+            if (cached_fso is not None):
+                cached_fso.update_information()
+                return cached_fso
 
         info = os.stat(fullpath.absolute_path)
 
@@ -604,11 +634,17 @@ class LocalFileSystem(FileSystem):
         hidden = filename.startswith(".") or (
                     is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
 
-        return FileSystemObject(fullpath,
-                                type,
-                                info.st_size,
-                                datetime.fromtimestamp(info.st_mtime),
-                                hidden)
+        fso = FileSystemObject(fullpath,
+                               type=type,
+                               size=info.st_size,
+                               mtime=datetime.fromtimestamp(info.st_mtime),
+                               exists=True,
+                               hidden=hidden)
+
+        if (this.cached):
+            this.update_file_object(fullpath,fso)
+
+        return fso
 class RemoteFileSystem(FileSystem):
 
     def __init__(this,*args,**kwargs):
@@ -686,20 +722,29 @@ class RemoteFileSystem(FileSystem):
         raise FileNotFoundError(f"No such file or directory: '{path}'")
 
 
-
-
-        return None
     def _make_remote_filesystem_object(this,dic:dict, path:str):
         type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
 
         fullpath = this.new_path(PathManager.join(path, dic['Name']), root=this.root)
 
-        mod_time = _fix_isotime(dic['ModTime']) #fixing mega.nz bugs
+        if (this.cached):
+            cached_fso = this.get_file_object(fullpath)
+            if (cached_fso is not None):
+                cached_fso.update_information()
+                return cached_fso
 
-        return FileSystemObject(fullpath,
-                                type,
-                                dic['Size'],
-                                datetime.fromisoformat(mod_time))
+        mod_time = _fix_isotime(dic['ModTime']) #fixing mega.nz bug
+
+        fso = FileSystemObject(fullpath,
+                               type=type,
+                               size=dic['Size'],
+                               mtime=datetime.fromisoformat(mod_time),
+                               exists=True)
+
+        if (this.cached):
+            this.update_file_object(fullpath,fso)
+
+        return fso
 
 
 
