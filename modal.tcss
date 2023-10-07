@@ -1,0 +1,10 @@
+.modal-window {
+    align: center middle;
+}
+
+.modal-window #modal-container
+{
+    height:10;
+    border:tall $success;
+    padding:2;
+}

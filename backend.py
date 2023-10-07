@@ -6,7 +6,7 @@ from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, m
 from file_filters import UnixPatternExpasionFilter,RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
-from config import RobinHoodConfiguration
+from config import RobinHoodProfile
 import subprocess
 import re
 import rclone_python
@@ -436,13 +436,13 @@ def apply_changes(changes:Iterable[SyncAction],
     _trigger("after_synching", SyncEvent())
 
 def filter_results(results:Iterable[SyncAction])->Iterable[SyncAction]:
-    exclusion_filters = RobinHoodConfiguration().exclusion_filters
+    exclusion_filters = RobinHoodProfile().current_profile.exclusion_filters
     filters:List[FileFilter] = []
 
     if exclusion_filters is not None:
-        filters = [UnixPatternExpasionFilter(pattern) for pattern in RobinHoodConfiguration().exclusion_filters]
+        filters = [UnixPatternExpasionFilter(pattern) for pattern in RobinHoodProfile().current_profile.exclusion_filters]
 
-    if RobinHoodConfiguration().exclude_hidden_files:
+    if RobinHoodProfile().current_profile.exclude_hidden_files:
         filters.append(RemoveHiddenFileFilter())
 
 

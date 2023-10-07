@@ -3,18 +3,20 @@ from typing import Dict,Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
 from textual import on, work, events
+from textual.screen import Screen,ModalScreen
 from textual.app import App, Binding, Widget, ComposeResult
 from textual.suggester import Suggester
 from textual.worker import get_current_worker
-from textual.containers import Container, Horizontal, VerticalScroll, Vertical
+from textual.containers import Container, Horizontal,  Vertical
 from textual.events import DescendantBlur
 from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea
 from textual.widgets.data_table import Column
 from textual.coordinate import Coordinate
-from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodConfiguration
+from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodProfile
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
+from config import RobinHoodConfiguration, RobinHoodProfile
 
 _SyncMethodsPrefix:Dict[SyncMode,str] = {
     SyncMode.UPDATE: ">>",
@@ -295,7 +297,7 @@ class RobinHoodExcludePath(Static):
 
     @property
     def paths(this) -> Iterable[str]:
-        return RobinHoodConfiguration().exclusion_filters
+        return this.app.profile.exclusion_filters
     def compose(this) -> ComposeResult:
         yield TextArea()
 
@@ -309,22 +311,62 @@ class RobinHoodExcludePath(Static):
         textarea = this.query_one(TextArea)
         new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
 
-        RobinHoodConfiguration().exclusion_filters = new_filters
+        this.app.profile.exclusion_filters = new_filters
 
+
+class PromptProfileNameModalScreen(ModalScreen):
+    BINDINGS = [Binding("escape", "force_close", priority=True)]
+    CSS_PATH = "modal.tcss"
+
+    def action_refresh(this):
+        this.refresh()
+    def compose(self) -> ComposeResult:
+        vertical = Vertical(
+            Label("Type the name for the new profile"),
+            Input(placeholder="Profile name", id="profile_name"),
+        id="modal-container")
+
+
+        yield vertical
+
+    def profile_name(this)->str:
+        return this.query_one("profile_name").value
+
+    def action_force_close(this):
+        this.query_one("#profile_name").value = ""
+        this.app.pop_screen()
+
+
+    @on(Input.Submitted)
+    def on_submitted(this):
+        name = this.query_one("#profile_name").value
+        if (len(name)>0):
+            this.app.profile.name = name
+            try:
+                RobinHoodConfiguration().add_profile(name,this.app.profile)
+                this.app.pop_screen()
+                this.app.save_profile()
+            except ValueError:
+                this.query_one("Label").update(Text.from_markup(f"[magenta]Profile name [yellow u]{name}[/yellow u] already in use[/]"))
+        else:
+            this.action_force_close()
 
 
 
 class RobinHood(App):
-    CSS_PATH = "topbar.tcss"
+    CSS_PATH = "main_style.tcss"
+    SCREENS = {"NewProfile": PromptProfileNameModalScreen(classes="modal-window")}
     BINDINGS =  [
                 Binding("ctrl+c", "quit", "Quit", priority=True),
                 Binding("ctrl+r","show_remotes","Toggle Remote"),
                 Binding("ctrl+p", "show_filters", "Toggle Path Filter List"),
                 Binding("ctrl+t", "switch_paths", "Switch Source/Destination Path"),
+                Binding("ctrl+s","save_profile","Save profile")
     ]
 
-    def __init__(this, *args, **kwargs): #(this, src=   None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
+    def __init__(this, profile:Union[RobinHoodProfile|None]=None, *args, **kwargs): #(this, src=   None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        this.profile = profile if profile is not None else RobinHoodConfiguration().current_profile
         this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
         this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
@@ -359,17 +401,8 @@ class RobinHood(App):
     def _validate_dir_inputs(this,widget:Widget) -> bool:
         value:str = widget.value
         fail:bool = False
-        #attr = None
 
-        # match widget.id:
-        #     case "source_text_area":
-        #         attr = "src"
-        #     case "dest_text_area":
-        #         attr = "dst"
 
-        #if (attr is not None):
-            #fs = getattr(this,attr)
-            #if (value is not None) and ((fs is None) or (fs.root!=value)):
         try:
             filesystem = fs_auto_determine(value,parse_all=True)
             if filesystem is None:
@@ -386,7 +419,8 @@ class RobinHood(App):
         if (fail):
             this.set_status(f"The path [underline yellow]{value}[/] is not valid")
             this.bell()
-
+        else:
+            this._update_profile_from_ui()
         return not fail
 
     @property
@@ -471,6 +505,20 @@ class RobinHood(App):
             for x in enablable:
                 x.disabled=True
 
+
+    def action_save_profile(this):
+        if (this.profile.name is None):
+            this.push_screen("NewProfile")
+        else:
+            this.save_profile()
+
+    def save_profile(this):
+        cfg = RobinHoodConfiguration()
+        cfg.edit_profile(this.profile.name, this.profile)
+        cfg.flush()
+        this.set_status(f"Profile [yellow]{this.profile.name}[/] saved.")
+
+
     def action_compare_again(this) -> None:
         this._summary_pane.results = None
         this._tree_pane.show_results(None)
@@ -478,10 +526,15 @@ class RobinHood(App):
 
     def action_switch_paths(this) -> None:
         this.src, this.dst = this.dst, this.src
+        this._update_profile_from_ui()
 
+
+    def _update_profile_from_ui(this):
+        this.profile.source_path = this.src
+        this.profile.destination_path = this.dst
 
     @on(events.Ready)
-    def prova(this):
+    def on_ready(this) -> None:
         this._update_job_related_interface()
 
 
@@ -569,13 +622,17 @@ class RobinHood(App):
 
     def compose(this) -> ComposeResult:
         this.screen.title = "🏹 Robin Hood"
+
+        if (this.profile.name is not None):
+            this.screen.title += f" [{this.profile.name}]"
+
         this.screen.sub_title = "Steal from the rich and give to the poor"
 
         yield Header()
         yield RobinHoodTopBar(
-            src=RobinHoodConfiguration().source_path,
-            dst=RobinHoodConfiguration().destination_path,
-            mode=RobinHoodConfiguration().sync_mode,
+            src=this.profile.source_path,
+            dst=this.profile.destination_path,
+            mode=this.profile.sync_mode,
             id="topbar",
             classes="overlayable")
         yield Vertical(
