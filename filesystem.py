@@ -18,13 +18,18 @@ current_timezone = lambda : datetime.now().astimezone().tzinfo
 UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
 
 def _fix_isotime(time):
-    pattern = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]*)\+[0-9]{2}:[0-9]{2}"
+    pattern = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]*)?(\+[0-9]{2}:[0-9]{2}|[a-zA-Z])?"
 
-    matches = re.findall(pattern, time)
+    matches = re.search(pattern, time)
 
-    for m in matches:
-        m = m.lstrip(".")
-        time = time.replace(m,m[:6])
+    # for m in matches:
+    #     m = m.lstrip(".")
+    #     time = time.replace(m,m[:6])
+
+    if matches[1] is not None:
+        time = time.replace(matches[1],"")
+    if (matches[2] is not None) and (not matches[2].startswith("+")):
+        time = time.replace(matches[2], "")
 
     return time
 
@@ -310,7 +315,7 @@ class FileSystemObject:
             for s in file_stats:
                 if s['Name'] == this.filename:
                     this._size = s['Size']
-                    this.mtime = _fix_isotime(s['ModTime'])
+                    this.mtime = datetime.fromisoformat(_fix_isotime(s['ModTime']))
                     this._exists = True
 
                     return

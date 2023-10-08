@@ -3,16 +3,16 @@ from typing import Dict,Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
 from textual import on, work, events
-from textual.screen import Screen,ModalScreen
+from textual.screen import ModalScreen
 from textual.app import App, Binding, Widget, ComposeResult
 from textual.suggester import Suggester
 from textual.worker import get_current_worker
 from textual.containers import Container, Horizontal,  Vertical
 from textual.events import DescendantBlur
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea
+from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea, Switch
 from textual.widgets.data_table import Column
 from textual.coordinate import Coordinate
-from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent, RobinHoodProfile
+from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
 from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
@@ -298,13 +298,32 @@ class RobinHoodExcludePath(Static):
     @property
     def paths(this) -> Iterable[str]:
         return this.app.profile.exclusion_filters
+
+    @property
+    def exclude_hidden(this) -> Iterable[str]:
+        return this.app.profile.exclude_hidden_files
+
+    @property
+    def deep_comparisons(this) -> Iterable[str]:
+        return this.app.profile.deep_comparisons
+
     def compose(this) -> ComposeResult:
         yield TextArea()
+        yield Horizontal(
+            Label("Exclude hidden files"),
+            Switch(id="exclude_hidden"),
+            Label("Deep comparison"),
+            Switch(id="deep_comparisons"),
+            id="other_settings"
+        )
 
     @on(events.Show)
     def show_filters(this) -> None:
         textarea = this.query_one(TextArea)
         textarea.load_text("\n".join(this.paths))
+
+        this.query_one("#exclude_hidden").value=this.exclude_hidden
+        this.query_one("#deep_comparisons").value = this.deep_comparisons
 
     @on(events.Hide)
     def save_filters(this) -> None:
@@ -312,6 +331,8 @@ class RobinHoodExcludePath(Static):
         new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
 
         this.app.profile.exclusion_filters = new_filters
+        this.app.profile.exclude_hidden_files =this.query_one("#exclude_hidden").value
+        this.app.profile.deep_comparisons = this.query_one("#deep_comparisons").value
 
 
 class PromptProfileNameModalScreen(ModalScreen):
@@ -585,12 +606,12 @@ class RobinHood(App):
 
     @work(exclusive=True,name="comparison",thread=True)
     def _run_update(this) -> None:
-        result = compare_tree(this.src, this.dst, mode=SyncMode.UPDATE, eventhandler=this._backend)
+        result = compare_tree(this.src, this.dst, mode=SyncMode.UPDATE, profile=this.profile, eventhandler=this._backend)
         this.show_results(result)
 
     @work(exclusive=True,name="comparison",thread=True)
     def _run_mirror(this) -> None:
-        result = compare_tree(this.src, this.dst, mode=SyncMode.MIRROR, eventhandler=this._backend)
+        result = compare_tree(this.src, this.dst, mode=SyncMode.MIRROR, profile=this.profile, eventhandler=this._backend)
         this.show_results(result)
 
     @work(exclusive=True, name="comparison", thread=True)
@@ -830,7 +851,7 @@ class FileTreeTable(DataTable):
             return None
 
 
-        this._results = sorted(this._results,key=lambda x : str(x.a))
+        this._results = sorted(this._results,key=lambda x : str(x.action_type))
 
         for i,x in enumerate(this._results):
             rendered_row = FileTreeTable._render_row(x)

@@ -199,24 +199,28 @@ class SyncAction:
         _trigger("on_synching", SyncEvent(this))
 
     def _check_success(this):
-        x = this.a
-        y = this.b
 
-        x.update_information()
-        y.update_information()
+        if this.action_type == ActionType.NOTHING:
+            success=True
+        else:
+            x = this.a
+            y = this.b
 
-        if (this.direction == ActionDirection.DST2SRC):
-            x, y = y, x
+            x.update_information()
+            y.update_information()
 
-        match this.action_type:
-            case ActionType.MKDIR:
-                success = y.exists
-            case ActionType.UPDATE | ActionType.COPY:
-                success = y.exists and (x.size == y.size)
-            case ActionType.DELETE:
-                success = not y.exists
-            case _:
-                success = True
+            if (this.direction == ActionDirection.DST2SRC):
+                x, y = y, x
+
+            match this.action_type:
+                case ActionType.MKDIR:
+                    success = y.exists
+                case ActionType.UPDATE | ActionType.COPY:
+                    success = y.exists and (x.size == y.size)
+                case ActionType.DELETE:
+                    success = not y.exists
+                case _:
+                    success = True
 
         this._status = SyncStatus.SUCCESS if success else SyncStatus.FAILED
 
@@ -320,6 +324,7 @@ def find_dedupe(path:Union[str|FileSystem],
 def compare_tree(src:Union[str|FileSystem],
                  dest:Union[str|FileSystem],
                  mode:SyncMode.UPDATE,
+                 profile:RobinHoodProfile,
                  eventhandler:[SyncEvent|None]=None
                  )->Iterable[SyncAction]:
 
@@ -411,7 +416,7 @@ def compare_tree(src:Union[str|FileSystem],
 
         results.append(SyncAction(source_object, dest_object, action, direction))
 
-    results = filter_results(results)
+    results = filter_results(results,profile)
 
     match mode:
         case SyncMode.UPDATE: results_for_update(results)
@@ -435,14 +440,14 @@ def apply_changes(changes:Iterable[SyncAction],
 
     _trigger("after_synching", SyncEvent())
 
-def filter_results(results:Iterable[SyncAction])->Iterable[SyncAction]:
-    exclusion_filters = RobinHoodProfile().current_profile.exclusion_filters
+def filter_results(results:Iterable[SyncAction],profile:RobinHoodProfile)->Iterable[SyncAction]:
+    exclusion_filters = profile.exclusion_filters
     filters:List[FileFilter] = []
 
     if exclusion_filters is not None:
-        filters = [UnixPatternExpasionFilter(pattern) for pattern in RobinHoodProfile().current_profile.exclusion_filters]
+        filters = [UnixPatternExpasionFilter(pattern) for pattern in profile.exclusion_filters]
 
-    if RobinHoodProfile().current_profile.exclude_hidden_files:
+    if profile.exclude_hidden_files:
         filters.append(RemoveHiddenFileFilter())
 
 

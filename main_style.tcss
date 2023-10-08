@@ -123,3 +123,17 @@ HeaderIcon{
     color: $warning
 }
 
+RobinHoodExcludePath #other_settings
+{
+
+    height: 5;
+    padding:1;
+}
+
+RobinHoodExcludePath #other_settings Label
+{
+    content-align: left middle;
+    width: auto;
+    height: 3;
+    padding-left:3;
+}

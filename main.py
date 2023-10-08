@@ -44,9 +44,12 @@ def make_configuration(args:Namespace) -> RobinHoodProfile:
     if (hasattr(args,"remote") and (args.remote is not None)):
         profile.destination_path = args.remote
 
-    if (profile.exclude_hidden_files): profile.exclude_hidden_files = args.exclude_hidden
-    if profile.deep_comparisons: profile.deep_comparisons = args.deep
-    if args.exclude is not None: profile.exclusion_filters = args.exclude
+    if (args.exclude_hidden):
+        profile.exclude_hidden_files = args.exclude_hidden
+    if args.deep:
+        profile.deep_comparisons = args.deep
+    if args.exclude is not None:
+        profile.exclusion_filters = args.exclude
 
     return profile
 def action_update(args:Namespace) -> None:
