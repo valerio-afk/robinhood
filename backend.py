@@ -3,10 +3,12 @@ from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
 from filesystem import FileType,FileSystemObject,FileSystem,fs_auto_determine, mkdir, convert_to_bytes, LocalFileSystem
+from filesystem import PathManager
 from file_filters import UnixPatternExpasionFilter,RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
 from config import RobinHoodProfile
+from platformdirs import site_cache_path
 import subprocess
 import re
 import rclone_python
@@ -122,7 +124,14 @@ def _get_trigger_fn(eventhandler:Union[SyncEvent|None]=None) -> Callable[[str,Sy
                 ... #event does not exist
 
     return _trigger
-class SyncAction:
+
+class AbstractSyncAction(ABC):
+
+    @abstractmethod
+    def apply_action(this, show_progress=False, eventhandler: [SyncEvent | None] = None) -> None:
+        ...
+
+class SyncAction(AbstractSyncAction):
     def __init__(this,
                  a:FileSystemObject,
                  b:FileSystemObject,
@@ -163,7 +172,7 @@ class SyncAction:
         return str(this)
 
     @property
-    def get_one_path(this):
+    def get_one_path(this) -> FileSystemObject:
         return this.a if this.b is None else this.b
     def apply_action(this, show_progress=False, eventhandler:[SyncEvent|None]=None) -> None:
         this._last_update = datetime.now()
@@ -191,14 +200,14 @@ class SyncAction:
                     y = this.a.containing_directory
 
                 this._status = SyncStatus.IN_PROGRESS
-                copy(x,y,show_progress=show_progress,listener=_update_internal_status)
+                copy(x,y,show_progress=show_progress,listener=_update_internal_status,args=['--use-mmap'])
 
 
         this._check_success()
 
         _trigger("on_synching", SyncEvent(this))
 
-    def _check_success(this):
+    def _check_success(this) -> None:
 
         if this.action_type == ActionType.NOTHING:
             success=True
@@ -227,6 +236,38 @@ class SyncAction:
     def get_update(this) -> Union[SyncProgress|None]:
         return this._update
 
+
+class BulkCopyAction(AbstractSyncAction):
+
+    def __init__(this,
+                 root_source:PathManager,
+                 root_dst: PathManager,
+                 direction:ActionDirection):
+        this._actions=[]
+        this._root_source = root_source
+        this._root_destination = root_dst
+        this.direction = direction
+
+
+    def add_action(this,action:SyncAction) -> None:
+        if not this._root_source.is_root_of(action.a.absolute_path):
+            raise ValueError(f"The file '{action.a.relative_path} 'is not in '{this._root_source}'")
+
+        if not this._root_destination.is_root_of(action.b.absolute_path):
+            raise ValueError(f"The file '{action.b.relative_path} 'is not in '{this._root_destination}'")
+
+        if action.action_type not in [ActionType.COPY, ActionType.UPDATE]:
+            raise ValueError("The provided action is not copying or updating a file")
+
+        if (action.direction != this.direction):
+            raise ValueError("The provided action is towards a different synching direction")
+
+        this._actions.append(action)
+
+    def apply_action(this, show_progress=False, eventhandler:[SyncEvent|None]=None) -> None:
+        #TODO continue form here
+        tmp_dir = site_cache_path()
+        tmp_fname = "rh_sync_tmp_XXXX"
 
 
 

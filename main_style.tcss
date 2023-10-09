@@ -10,7 +10,7 @@ Screen {
 }
 
 #topbar{
-    height:8;
+    height:7;
 }
 
 #topbar Input

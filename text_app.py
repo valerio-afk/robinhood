@@ -319,8 +319,9 @@ class RobinHoodExcludePath(Static):
 
     @on(events.Show)
     def show_filters(this) -> None:
-        textarea = this.query_one(TextArea)
-        textarea.load_text("\n".join(this.paths))
+        if this.paths is not None:
+            textarea = this.query_one(TextArea)
+            textarea.load_text("\n".join(this.paths))
 
         this.query_one("#exclude_hidden").value=this.exclude_hidden
         this.query_one("#deep_comparisons").value = this.deep_comparisons
@@ -392,7 +393,7 @@ class RobinHood(App):
         this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
         this._details_pane:FileDetailsSummary = FileDetailsSummary(id="file_details")
-        this._progress_bar:ProgressBar = ProgressBar(id="synch_progbar")
+        this._progress_bar:ProgressBar = ProgressBar(show_eta=False,id="synch_progbar")
         this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(id="filter_list")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
 
@@ -467,7 +468,7 @@ class RobinHood(App):
     @property
     def is_working(this) -> bool:
         for w in this.workers:
-            if (w.name in ["comparison","synching"]) and w.is_running:
+            if (w.name in ["comparison","synching"]) and not w.is_cancelled:
                 return True
 
         return False
@@ -475,7 +476,7 @@ class RobinHood(App):
     @property
     def is_synching(this) -> bool:
         for w in this.workers:
-            if (w.name == "synching") and w.is_running:
+            if (w.name == "synching") and not w.is_cancelled:
                 return True
 
         return False
@@ -758,7 +759,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     desc_action = "Copying"
 
                     if update is not None:
-                        more_info = f"{update.progress}%"
+                        more_info = f"[yellow]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
 
             desc = f"{desc_action} {p} {more_info}"
             this.update_status(desc)
