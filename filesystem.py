@@ -1,8 +1,8 @@
-from typing import Any, Union
+from typing import Any, Union, List, Tuple
 from abc import ABC, abstractmethod
 from enum import Enum
 from rclone_python import rclone
-from datetime import datetime,timezone
+from datetime import datetime, timezone
 from copy import copy
 from psutil import disk_partitions
 import os
@@ -11,11 +11,11 @@ import stat
 import subprocess
 import json
 
-
-is_windows = lambda : os.name =='nt'
-current_timezone = lambda : datetime.now().astimezone().tzinfo
+is_windows = lambda: os.name == 'nt'
+current_timezone = lambda: datetime.now().astimezone().tzinfo
 
 UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
+
 
 def _fix_isotime(time):
     pattern = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]*)?(\+[0-9]{2}:[0-9]{2}|[a-zA-Z])?"
@@ -27,17 +27,18 @@ def _fix_isotime(time):
     #     time = time.replace(m,m[:6])
 
     if matches[1] is not None:
-        time = time.replace(matches[1],"")
+        time = time.replace(matches[1], "")
     if (matches[2] is not None) and (not matches[2].startswith("+")):
         time = time.replace(matches[2], "")
 
     return time
 
-#Adapted from https://stackoverflow.com/questions/1094841/get-human-readable-version-of-file-size
-def sizeof_fmt(num:int, suffix:str="B") -> str:
+
+# Adapted from https://stackoverflow.com/questions/1094841/get-human-readable-version-of-file-size
+def sizeof_fmt(num: int, suffix: str = "B") -> str:
     if (num == 0):
         return "-"
-    
+
     for unit in UNITS:
         if abs(num) < 1024.0:
             return f"{num:3.1f}{unit}{suffix}"
@@ -45,53 +46,69 @@ def sizeof_fmt(num:int, suffix:str="B") -> str:
     return f"{num:.1f}Y{suffix}"
 
 
-def convert_to_bytes(value:float,unit:str) -> int:
-    for i,u in enumerate(UNITS[1:]):
+def convert_to_bytes(value: float, unit: str) -> int:
+    for i, u in enumerate(UNITS[1:]):
         if u in unit:
-            return int(value * (1024**(i+1)))
+            return int(value * (1024 ** (i + 1)))
 
     return int(value)
 
 
+def get_rclone_remotes() -> List[Tuple[str, ...]]:
+    '''
+    Get the list of remote directories from rclone
 
-def get_rclone_remotes():
+    :return: A list of tuples each containing the name and type
+    '''
+
+    # Run rclone via subprocess to get the list of remotes
     output = subprocess.run(
-        ["rclone","listremotes","--long"],
+        ["rclone", "listremotes", "--long"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         encoding="utf-8"
     )
 
-    return [tuple([x.strip() for x in line.split(":")[::-1]]) for line in output.stdout.strip().split("\n")]
+    # make the tuples and the list via 2 list comprehensions
+    return [tuple([x.strip() for x in line.split(":")[::-1]]) for line in output.stdout.strip().splitlines()]
+
 
 class PathManager(ABC):
     PATH_SEPARATOR = '/'
     VOLUME_SEPARATOR = ":"
 
-    def __init__(this,path,root=None):
+    def __init__(this, path, root=None):
         this._basepath = this.normalise(path if root is None else root)
 
         if (this.is_relative(this._basepath)):
-            raise MissingAbsolutePathException(this._basepath,"Basepath")
+            raise MissingAbsolutePathException(this._basepath, "Basepath")
 
         path = this.normalise(path)
 
         if not path.startswith(this._basepath):
-            this._path = this.normalise(this.join(this.root,path))
+            this._path = this.normalise(this.join(this.root, path))
         else:
             this._path = path
 
         if not this.is_under_root(this._path):
-            raise PathOutsideRootException(this.absolute_path,this.root)
+            raise PathOutsideRootException(this.absolute_path, this.root)
 
     def __copy__(this):
-        return type(this)(path=this.absolute_path,root=this.root)
+        return type(this)(path=this.absolute_path, root=this.root)
 
     @classmethod
-    def as_posix(cls,p):
-        return p.replace("\\", "/")
+    def make_path(cls, path:str):
+        suitable_class = NTPathManager if path.find(NTPathManager.VOLUME_SEPARATOR)>=0 else PosixPathManager
+
+        return suitable_class(path=".", root=path)
+
+
     @classmethod
-    def join(cls,*args):
+    def as_posix(cls, p):
+        return p.replace("\\", "/")
+
+    @classmethod
+    def join(cls, *args):
         paths = args[0] if len(args) == 1 else args
 
         if (len(paths) == 0):
@@ -99,17 +116,17 @@ class PathManager(ABC):
 
         r = paths[0]
 
-        for i in range(1,len(paths)):
+        for i in range(1, len(paths)):
             xx = r.endswith(cls.PATH_SEPARATOR)
             yy = paths[i].startswith(cls.PATH_SEPARATOR)
 
             if (xx ^ yy):
-                r+=paths[i]
+                r += paths[i]
             elif (xx and yy):
-                r+=paths[i][1:]
+                r += paths[i][1:]
             else:
                 if (cls.is_relative(paths[i])):
-                    r+=cls.PATH_SEPARATOR+paths[i]
+                    r += cls.PATH_SEPARATOR + paths[i]
                 else:
                     r = paths[i]
 
@@ -122,7 +139,7 @@ class PathManager(ABC):
         return this.absolute_path
 
     @classmethod
-    def is_special_dir(cls,d:str):
+    def is_special_dir(cls, d: str):
         return (d == ".") or (d == "..")
 
     @classmethod
@@ -134,7 +151,7 @@ class PathManager(ABC):
         return not cls.is_absolute(path)
 
     @classmethod
-    def normalise(cls,path):
+    def normalise(cls, path):
         return cls.as_posix(path)
 
     @classmethod
@@ -144,7 +161,7 @@ class PathManager(ABC):
         if tokens[0] == '':
             tokens[0] = '/'
 
-        return [t for t in tokens if len(t)>0]
+        return [t for t in tokens if len(t) > 0]
 
     @property
     @abstractmethod
@@ -176,65 +193,65 @@ class PathManager(ABC):
         return this._basepath
 
     @root.setter
-    def root(this,path):
-        #when root is changed, the path needs to be re-rooted
-        #therefore, the old relative path needs to be store
-        #to be used later to re-root the whole thing
+    def root(this, path):
+        # when root is changed, the path needs to be re-rooted
+        # therefore, the old relative path needs to be store
+        # to be used later to re-root the whole thing
         old_relpath = this.relative_path
 
         this._basepath = this.normalise(path)
 
         if (this.is_absolute(this._path)):
-            this._path = this.join(this._basepath,old_relpath)
+            this._path = this.join(this._basepath, old_relpath)
 
     @classmethod
-    def is_root_of(cls, path,root):
+    def is_root_of(cls, path, root):
         if cls.is_relative(path):
             return True
 
         spath = cls.split(cls.normalise(path))
         sroot = cls.split(root)
 
-
-        if (len(sroot)<=len(spath)):
-            for i,(x,y) in enumerate(zip (sroot,spath)):
-                if (i==0):
-                    #this is also viable for posix paths because the first item will be just "/"
-                    if (x.lower() != y.lower()) and (y!=cls.PATH_SEPARATOR):
+        if (len(sroot) <= len(spath)):
+            for i, (x, y) in enumerate(zip(sroot, spath)):
+                if (i == 0):
+                    # this is also viable for posix paths because the first item will be just "/"
+                    if (x.lower() != y.lower()) and (y != cls.PATH_SEPARATOR):
                         return False
-                elif x!=y:
-                        return False
+                elif x != y:
+                    return False
 
             return True
         else:
             return False
 
     def is_under_root(this, path):
-        return this.is_root_of(path,this.root)
+        return this.is_root_of(path, this.root)
 
 
 class FileType(Enum):
-    OTHER=0
-    REGULAR=1
-    DIR=2
+    OTHER = 0
+    REGULAR = 1
+    DIR = 2
+
 
 class FileSystemObject:
 
     def __init__(this,
-                 fullpath:Union[PathManager|None],
-                 type:FileType,
-                 size:Union[int|None],
-                 mtime:Union[datetime|None],
-                 exists:Union[bool|None]=None,
-                 hidden:bool=False):
-        this.fullpath=fullpath
-        this.type=type
-        this._size=size
-        this._mtime=None
-        this.mtime=mtime
-        this.hidden=hidden
+                 fullpath: Union[PathManager | None],
+                 type: FileType,
+                 size: Union[int | None],
+                 mtime: Union[datetime | None],
+                 exists: Union[bool | None] = None,
+                 hidden: bool = False):
+        this.fullpath = fullpath
+        this.type = type
+        this._size = size
+        this._mtime = None
+        this.mtime = mtime
+        this.hidden = hidden
         this._exists = exists
-        this.processed=False
+        this.processed = False
 
     @property
     def absolute_path(this) -> str:
@@ -252,10 +269,10 @@ class FileSystemObject:
     def filename(this) -> str:
         return os.path.split(this.absolute_path)[1]
 
-    def __eq__(this,other) -> bool:
+    def __eq__(this, other) -> bool:
         if type(other) == str:
-            return (this.absolute_path==other) or (this.relative_path == other)
-        elif isinstance(other,FileSystemObject):
+            return (this.absolute_path == other) or (this.relative_path == other)
+        elif isinstance(other, FileSystemObject):
             return this.relative_path == other.relative_path
         else:
             return False
@@ -271,7 +288,7 @@ class FileSystemObject:
 
     @property
     def is_remote(this) -> bool:
-        for _,drive in get_rclone_remotes():
+        for _, drive in get_rclone_remotes():
             if this.path.startswith(drive):
                 return True
         return False
@@ -282,7 +299,7 @@ class FileSystemObject:
 
     @property
     def size(this) -> int:
-        if (this._size is None) or (this._size<0):
+        if (this._size is None) or (this._size < 0):
             this.update_information()
 
         return this._size
@@ -290,24 +307,25 @@ class FileSystemObject:
     @property
     def exists(this) -> bool:
         if this._exists is None:
-            output = subprocess.run(['rclone','lsf',this.absolute_path],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            output = subprocess.run(['rclone', 'lsf', this.absolute_path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
 
             return output.returncode == 0
         else:
             return this._exists
 
     @property
-    def mtime(this) -> Union[datetime|None]:
+    def mtime(this) -> Union[datetime | None]:
         return this._mtime
 
     @mtime.setter
-    def mtime(this, mtime: Union[datetime|None]) -> None:
-        this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(tzinfo=current_timezone())
-
-
+    def mtime(this, mtime: Union[datetime | None]) -> None:
+        this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(
+            tzinfo=current_timezone())
 
     def update_information(this):
-        output = subprocess.run(['rclone', 'lsjson', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = subprocess.run(['rclone', 'lsjson', this.absolute_path], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
 
         if output.returncode == 0:
             file_stats = json.loads(output.stdout.decode())
@@ -323,46 +341,46 @@ class FileSystemObject:
         this._exists = False
 
 
-
-
 class PathException(Exception):
     ...
 
+
 class MissingAbsolutePathException(PathException):
 
-    def __init__(this, path,desc="Path"):
+    def __init__(this, path, desc="Path"):
         super().__init__(f"{desc} {path} is not an absolute path.")
+
 
 class PathOutsideRootException(PathException):
 
-    def __init__(this,root,path):
+    def __init__(this, root, path):
         super().__init__(f"The path {path} is not rooted in {root}")
 
 
 class PosixPathManager(PathManager):
 
-    def __init__(this,path,root=None):
+    def __init__(this, path, root=None):
         bp = this.normalise(path if root is None else root)
-        path =  this.normalise(path)
+        path = this.normalise(path)
 
         if (this.is_relative(bp)):
-            raise MissingAbsolutePathException(bp,"Basepath")
+            raise MissingAbsolutePathException(bp, "Basepath")
 
-        if not this.is_root_of(path,bp):
+        if not this.is_root_of(path, bp):
             raise PathOutsideRootException(path, bp)
 
-        super().__init__(path,bp)
+        super().__init__(path, bp)
 
     @classmethod
     def normalise(cls, path):
-        path = super(PosixPathManager,PosixPathManager).normalise(path)
+        path = super(PosixPathManager, PosixPathManager).normalise(path)
         tokens = cls.split(path)
 
-        tokens[1:]= [t for t in tokens[1:] if t != "."]
+        tokens[1:] = [t for t in tokens[1:] if t != "."]
 
         while ".." in tokens:
             idx = tokens.index("..")
-            del tokens[max(idx-1,0):idx+1]
+            del tokens[max(idx - 1, 0):idx + 1]
 
         if (tokens is None) or (len(tokens) == 0):
             return cls.PATH_SEPARATOR
@@ -378,20 +396,21 @@ class PosixPathManager(PathManager):
             if (len(relpath) == 0):
                 relpath = "."
             elif relpath[0] == this.PATH_SEPARATOR:
-                relpath=relpath[1:]
+                relpath = relpath[1:]
 
             return relpath
         raise PathOutsideRootException(this.root, this.absolute_path)
 
+
 class NTPathManager(PathManager):
 
     @classmethod
-    def get_volume(cls,path):
+    def get_volume(cls, path):
         path = path.strip()
         if (path.find(cls.VOLUME_SEPARATOR) > 0):
-            volume = path.split(cls.VOLUME_SEPARATOR)[0]  + cls.VOLUME_SEPARATOR
+            volume = path.split(cls.VOLUME_SEPARATOR)[0] + cls.VOLUME_SEPARATOR
 
-            return volume if len(volume)>0 else None
+            return volume if len(volume) > 0 else None
 
         return None
 
@@ -404,14 +423,14 @@ class NTPathManager(PathManager):
     def is_absolute(cls, path):
         path = cls.strip_volume(path)
 
-        return super(NTPathManager,NTPathManager).is_absolute(path)
+        return super(NTPathManager, NTPathManager).is_absolute(path)
 
     @classmethod
     def normalise(cls, path):
         path = super(PosixPathManager, PosixPathManager).normalise(path)
         tokens = cls.split(path)
 
-        tokens[1:]= [t for t in tokens[1:] if t != "."]
+        tokens[1:] = [t for t in tokens[1:] if t != "."]
 
         vol = cls.get_volume(path)
 
@@ -419,16 +438,16 @@ class NTPathManager(PathManager):
 
         while ".." in tokens:
             idx = tokens.index("..")
-            del tokens[max(idx-1,min_idx):idx+1]
+            del tokens[max(idx - 1, min_idx):idx + 1]
 
         return cls.join(tokens)
 
     @classmethod
     def split(cls, path):
         vol = cls.get_volume(path)
-        tokens = super(NTPathManager,NTPathManager).split(path)
+        tokens = super(NTPathManager, NTPathManager).split(path)
 
-        if (vol is not None) and  (vol.lower() == tokens[0].lower()):
+        if (vol is not None) and (vol.lower() == tokens[0].lower()):
             tokens[0] += cls.PATH_SEPARATOR
 
         return tokens
@@ -438,30 +457,33 @@ class NTPathManager(PathManager):
         path = this.absolute_path
         if (this.is_under_root(path)):
             path = path[len(this.root):]
-            if (len(path)==0):
+            if (len(path) == 0):
                 return "."
 
-            if (path[0]==this.PATH_SEPARATOR):
+            if (path[0] == this.PATH_SEPARATOR):
                 path = path[1:]
 
             return path
 
         else:
-            raise PathOutsideRootException(this.root,this.absolute_path) #Exception(f"The path {this.absolute_path} is not rooted in {this.root}")
+            raise PathOutsideRootException(this.root,
+                                           this.absolute_path)  # Exception(f"The path {this.absolute_path} is not rooted in {this.root}")
 
     def cd(this, path):
-        if path.startswith("/"): # or path.startswith("./"):
-            path = this.join(this.root,path)
+        if path.startswith("/"):  # or path.startswith("./"):
+            path = this.join(this.root, path)
 
         super().cd(path)
+
+
 class FileSystem(ABC):
 
-    def __init__(this,path:str,*,path_manager:PathManager.__class__,cached:bool=False,force:bool=False):
-        this._path=path_manager(path)
+    def __init__(this, path: str, *, path_manager: PathManager.__class__, cached: bool = False, force: bool = False):
+        this._path = path_manager(path)
         # this.filter_callback = []
-        this._cache:Any = []
+        this._cache: Any = []
         this._path_manager = path_manager
-        this._cached=cached
+        this._cached = cached
         this._file_objects = {}
 
         if (not force) and (not this.exists(this.root)):
@@ -473,7 +495,7 @@ class FileSystem(ABC):
     def __repr__(this) -> str:
         return str(this)
 
-    def update_file_object(this,path:PathManager,fo:Union[FileSystemObject|None]):
+    def update_file_object(this, path: PathManager, fo: Union[FileSystemObject | None]):
         p = path.relative_path
         if fo is None:
             if p in this._file_objects.keys():
@@ -481,7 +503,7 @@ class FileSystem(ABC):
         else:
             this._file_objects[p] = fo
 
-    def get_file_object(this,path:PathManager) -> Union[FileSystemObject|None]:
+    def get_file_object(this, path: PathManager) -> Union[FileSystemObject | None]:
         p = path.relative_path
         return this._file_objects[p] if p in this._file_objects.keys() else None
 
@@ -490,7 +512,7 @@ class FileSystem(ABC):
         return this._cached
 
     @cached.setter
-    def cached(this,value:bool) -> None:
+    def cached(this, value: bool) -> None:
         this._cached = value
 
     @property
@@ -498,35 +520,35 @@ class FileSystem(ABC):
         return this._path.root
 
     @property
-    def root(this)  -> str:
+    def root(this) -> str:
         return this.base_path
 
     @property
-    def current_path(this)  -> str:
+    def current_path(this) -> str:
         return this._path.absolute_path
 
     @property
-    def cwd(this)  -> str:
+    def cwd(this) -> str:
         return this.current_path
 
     @abstractmethod
     def _load(this) -> None:
         ...
 
-    def load(this,force=True) -> None:
-        if force or (this._cache is None) or (len(this._cache)==0):
+    def load(this, force=True) -> None:
+        if force or (this._cache is None) or (len(this._cache) == 0):
             if (not this.cached) or force:
                 this._load()
 
     @abstractmethod
-    def ls(this, path:Union[str|None]=None):
+    def ls(this, path: Union[str | None] = None):
         ...
 
     @abstractmethod
-    def _find_dir_in_cache(this, dir:str):
+    def _find_dir_in_cache(this, dir: str):
         ...
 
-    def cd(this,path) -> None:
+    def cd(this, path) -> None:
         exists = this.exists(path) if not this.cached else this._find_dir_in_cache(path)
 
         if not PathManager.is_special_dir(path) and exists is None:
@@ -538,37 +560,37 @@ class FileSystem(ABC):
         return this._path.visit(path)
 
     @abstractmethod
-    def exists(this,filename) -> bool:
+    def exists(this, filename) -> bool:
         ...
 
     @abstractmethod
-    def get_file(this,path:PathManager) -> FileSystemObject:
+    def get_file(this, path: PathManager) -> FileSystemObject:
         ...
 
-    def new_path(this,path:str,root:Union[str|None]=None) -> PathManager:
-        return this._path_manager(path,root if root is not None else this.root)
+    def new_path(this, path: str, root: Union[str | None] = None) -> PathManager:
+        return this._path_manager(path, root if root is not None else this.root)
 
 
 class LocalFileSystem(FileSystem):
 
-    def __init__(this,*args,**kwargs):
+    def __init__(this, *args, **kwargs):
         if ("path_manager" not in kwargs) or (kwargs['path_manager'] is None):
             kwargs['path_manager'] = NTPathManager if is_windows() else PosixPathManager
 
+        super().__init__(*args, **kwargs)
 
-        super().__init__(*args,**kwargs)
-
-        #this.add_filter_callback(lambda x : x.type != FileType.OTHER) # remove "other" files
+        # this.add_filter_callback(lambda x : x.type != FileType.OTHER) # remove "other" files
 
     def _load(this):
         if this.cached:
-            this._cache = [ (this.new_path(path,root=this.base_path).relative_path, dirs, files) for path, dirs, files in os.walk(this.base_path)]
+            this._cache = [(this.new_path(path, root=this.base_path).relative_path, dirs, files) for path, dirs, files
+                           in os.walk(this.base_path)]
 
-    def _find_local(this,path):
+    def _find_local(this, path):
         dirs = []
         files = []
 
-        path = this.new_path(path,this.root)
+        path = this.new_path(path, this.root)
 
         try:
             for itm in os.scandir(path.absolute_path):
@@ -577,17 +599,17 @@ class LocalFileSystem(FileSystem):
                 elif itm.is_file():
                     files.append(itm.name)
 
-            return (path.absolute_path,dirs,files)
+            return (path.absolute_path, dirs, files)
         except FileNotFoundError:
             return None
-    def _find_dir_in_cache(this,dir):
-        dir_to_search = this.new_path(dir,root=this.base_path).relative_path
-        for path,dirs,files in this._cache:
-            if (path==dir) or (path == dir_to_search):
-                return (path,dirs,files)
+
+    def _find_dir_in_cache(this, dir):
+        dir_to_search = this.new_path(dir, root=this.base_path).relative_path
+        for path, dirs, files in this._cache:
+            if (path == dir) or (path == dir_to_search):
+                return (path, dirs, files)
 
         return None
-
 
     def ls(this, path=None):
         cp = this.current_path if path is None else path
@@ -597,29 +619,29 @@ class LocalFileSystem(FileSystem):
         if listdir is None:
             return []
 
-        _,dirs,files = listdir
+        _, dirs, files = listdir
 
-        content = [this._make_local_filesystem_object(x,cp) for x in dirs+files]
+        content = [this._make_local_filesystem_object(x, cp) for x in dirs + files]
 
-        #content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
+        # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
 
         return content
 
-    def exists(this,filename):
+    def exists(this, filename):
         p = this.visit(filename)
 
         return os.path.exists(p.absolute_path)
 
-    def get_file(this,path:PathManager) -> FileSystemObject:
+    def get_file(this, path: PathManager) -> FileSystemObject:
         p, name = os.path.split(path.relative_path)
 
         if p == "":
             p = "./"
 
-        return this._make_local_filesystem_object(name,p)
+        return this._make_local_filesystem_object(name, p)
 
-    def _make_local_filesystem_object(this,filename:str, path:str) -> FileSystemObject:
-        fullpath = this.new_path(PathManager.join(path,filename),root=this.root)
+    def _make_local_filesystem_object(this, filename: str, path: str) -> FileSystemObject:
+        fullpath = this.new_path(PathManager.join(path, filename), root=this.root)
 
         if (this.cached):
             cached_fso = this.get_file_object(fullpath)
@@ -637,7 +659,7 @@ class LocalFileSystem(FileSystem):
             type = FileType.REGULAR
 
         hidden = filename.startswith(".") or (
-                    is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
+                is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
 
         fso = FileSystemObject(fullpath,
                                type=type,
@@ -647,60 +669,60 @@ class LocalFileSystem(FileSystem):
                                hidden=hidden)
 
         if (this.cached):
-            this.update_file_object(fullpath,fso)
+            this.update_file_object(fullpath, fso)
 
         return fso
+
+
 class RemoteFileSystem(FileSystem):
 
-    def __init__(this,*args,**kwargs):
+    def __init__(this, *args, **kwargs):
         if ("path_manager" not in kwargs) or (kwargs['path_manager'] is None):
             kwargs['path_manager'] = NTPathManager
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
     def _load(this):
-        this._cache = rclone.ls(this.base_path,args=["-R"])
+        this._cache = rclone.ls(this.base_path, args=["-R"])
 
-    def _find_dir_in_cache(this,dir):
+    def _find_dir_in_cache(this, dir):
         dir_to_search = this.new_path(dir, root=this.base_path).relative_path
 
         for itm in this._cache:
             remote_path = "/" + itm['Path']
-            if (remote_path==dir) or (remote_path == dir_to_search):
+            if (remote_path == dir) or (remote_path == dir_to_search):
                 return itm
 
         return None
 
-    def _dir(this,path):
+    def _dir(this, path):
         dir = []
 
-        #if (path.startswith("/")): path = path[1:]
+        # if (path.startswith("/")): path = path[1:]
 
         items = this._cache if this.cached else rclone.ls(path.absolute_path)
         relpath = path.relative_path
 
         if (relpath == "."): relpath = ""
 
-
         for itm in items:
-            p,tail = os.path.split(itm['Path'])
+            p, tail = os.path.split(itm['Path'])
 
-            if (p==relpath):
+            if (p == relpath):
                 dir.append(itm)
 
         return dir
-
 
     def ls(this, path=None):
         cp = this.current_path if path is None else path
         cp = this.new_path(cp, root=this.base_path)
 
         content = [this._make_remote_filesystem_object(x, cp.relative_path) for x in this._dir(cp)]
-        #content = [f for f in content if all([fn(f) for fn in this.filter_callback])]
+        # content = [f for f in content if all([fn(f) for fn in this.filter_callback])]
 
         return content
 
-    def exists(this,filename):
+    def exists(this, filename):
         p = this.visit(filename)
 
         output = subprocess.run(
@@ -710,11 +732,10 @@ class RemoteFileSystem(FileSystem):
             encoding="utf-8"
         )
 
-
         return "not found" not in output.stderr
 
-    def get_file(this,path:PathManager) -> FileSystemObject:
-        p,name = os.path.split(path.relative_path)
+    def get_file(this, path: PathManager) -> FileSystemObject:
+        p, name = os.path.split(path.relative_path)
 
         parent_path = this.new_path(p)
 
@@ -722,12 +743,11 @@ class RemoteFileSystem(FileSystem):
 
         for itm in content:
             if itm['Name'] == name:
-                return this._make_remote_filesystem_object(itm,parent_path.absolute_path)
+                return this._make_remote_filesystem_object(itm, parent_path.absolute_path)
 
         raise FileNotFoundError(f"No such file or directory: '{path}'")
 
-
-    def _make_remote_filesystem_object(this,dic:dict, path:str):
+    def _make_remote_filesystem_object(this, dic: dict, path: str):
         type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
 
         fullpath = this.new_path(PathManager.join(path, dic['Name']), root=this.root)
@@ -738,7 +758,7 @@ class RemoteFileSystem(FileSystem):
                 cached_fso.update_information()
                 return cached_fso
 
-        mod_time = _fix_isotime(dic['ModTime']) #fixing mega.nz bug
+        mod_time = _fix_isotime(dic['ModTime'])  # fixing mega.nz bug
 
         fso = FileSystemObject(fullpath,
                                type=type,
@@ -747,14 +767,12 @@ class RemoteFileSystem(FileSystem):
                                exists=True)
 
         if (this.cached):
-            this.update_file_object(fullpath,fso)
+            this.update_file_object(fullpath, fso)
 
         return fso
 
 
-
-
-def fs_auto_determine(path:str,parse_all:bool=False) -> FileSystem:
+def fs_auto_determine(path: str, parse_all: bool = False) -> FileSystem:
     head, tail = os.path.split(path)
 
     rclone_drives = [drive for _, drive in get_rclone_remotes()]
@@ -777,10 +795,12 @@ def fs_auto_determine(path:str,parse_all:bool=False) -> FileSystem:
                 return RemoteFileSystem(fullpath)
             else:
                 return LocalFileSystem(fullpath)
-def fs_autocomplete(path:str,min_chars:int=3) -> str:
+
+
+def fs_autocomplete(path: str, min_chars: int = 3) -> str:
     _, tail = os.path.split(path)
 
-    if (len(tail)<min_chars):
+    if (len(tail) < min_chars):
         return None
 
     fs = fs_auto_determine(path)
@@ -789,15 +809,16 @@ def fs_autocomplete(path:str,min_chars:int=3) -> str:
         fs.cached = False
         ls = fs.ls()
 
-        #return str(ls)
+        # return str(ls)
 
         for obj in ls:
-            _,name = os.path.split(obj.absolute_path)
+            _, name = os.path.split(obj.absolute_path)
 
             if name.startswith(tail):
                 return obj.absolute_path
 
-def mkdir(path:FileSystemObject):
+
+def mkdir(path: FileSystemObject):
     output = subprocess.run(
         ["rclone", "mkdir", path.absolute_path],
         stdout=subprocess.PIPE,

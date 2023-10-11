@@ -79,7 +79,8 @@ Input.-valid {
 
 FileTreeTable
 {
-    min-height: 5
+    min-height: 5;
+    height:1fr;
 }
 
 

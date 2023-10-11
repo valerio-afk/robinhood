@@ -11,10 +11,11 @@ from textual.containers import Container, Horizontal,  Vertical
 from textual.events import DescendantBlur
 from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea, Switch
 from textual.widgets.data_table import Column
+from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
-from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent
+from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
-from filesystem import get_rclone_remotes,NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
+from filesystem import get_rclone_remotes, PathManager, NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
 from config import RobinHoodConfiguration, RobinHoodProfile
 
@@ -23,6 +24,13 @@ _SyncMethodsPrefix:Dict[SyncMode,str] = {
     SyncMode.MIRROR: "->",
     SyncMode.SYNC: "<>",
     SyncMode.DEDUPE: "**"
+}
+
+_SyncMethodsNames:Dict[SyncMode,str] = {
+    SyncMode.UPDATE: "Update",
+    SyncMode.MIRROR: "Mirror",
+    SyncMode.SYNC: "Bidirectional sync",
+    SyncMode.DEDUPE: "Find deduplicates"
 }
 
 SyncMethods:List[Tuple[str,SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x).split(".")[1].capitalize(), x) for x in SyncMode]
@@ -397,7 +405,6 @@ class RobinHood(App):
         this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(id="filter_list")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
 
-
     def post_display_hook(this) -> None:
         this._tree_pane.adjust_column_sizes()
 
@@ -467,16 +474,20 @@ class RobinHood(App):
 
     @property
     def is_working(this) -> bool:
-        for w in this.workers:
-            if (w.name in ["comparison","synching"]) and not w.is_cancelled:
-                return True
-
-        return False
+        return this.is_comparing or this.is_synching
 
     @property
     def is_synching(this) -> bool:
         for w in this.workers:
             if (w.name == "synching") and not w.is_cancelled:
+                return True
+
+        return False
+
+    @property
+    def is_comparing(this) -> bool:
+        for w in this.workers:
+            if (w.name == "comparison") and not w.is_cancelled:
                 return True
 
         return False
@@ -521,8 +532,7 @@ class RobinHood(App):
             button.variant = "error"
             button.label = "Stop"
 
-            if (this.is_working):
-                this.show_progressbar = True
+            this.show_progressbar = this.is_comparing
 
             for x in enablable:
                 x.disabled=True
@@ -576,6 +586,8 @@ class RobinHood(App):
                 if w.name in ["comparison","synching"]:
                     w.cancel()
 
+            kill_all_subprocesses()
+
             this.set_status("[bright_magenta]Operation stopped[/]")
         elif this._summary_pane.has_pending_actions:
             this._run_synch()
@@ -622,7 +634,16 @@ class RobinHood(App):
 
     @work(exclusive=True,name="synching",thread=True)
     def _run_synch(this) -> None:
-        apply_changes(this._tree_pane.results,this._backend)
+
+        # Makes source/destination Paths to help the bulk operation manager in apply_changes
+        source = PathManager.make_path(this.src)
+        destination = PathManager.make_path(this.dst) if this.syncmode != SyncMode.DEDUPE else None
+
+        apply_changes(this._tree_pane.results,
+                      local=source,
+                      remote=destination,
+                      eventhandler=this._backend
+        )
 
 
     def update_progressbar(this, update:Union[SyncProgress|SyncEvent]):
@@ -737,37 +758,69 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def before_synching(this, event:SyncEvent) -> None:
         this.update_status(f"Initiating synchronisation ...")
 
-    def on_synching(this, event:SyncEvent) -> None:
+    def on_synching(this, event:Union[SyncEvent|Iterable[SyncEvent]]) -> None:
+        # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
         this._check_running_status()
 
-        action:SyncAction = event.value
+        # If the event param is a list of a single element, I treat it as a single item and print detailed information
+        # about it
+        if (not isinstance(event,SyncEvent)) and (len(event)==1):
+            event = event.pop()
 
-        p = action.get_one_path.relative_path
+        # Check if just one event arrived, or it's an iterable
+        if isinstance(event,SyncEvent):
+            # Take the current action from the event
+            action = event.value
 
-        if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
-            desc_action = ""
-            more_info = ""
+            # Get the relative path from either src or dest (it shouldn't matter - it's just for displaying purposes)
+            p = action.get_one_path.relative_path
 
-            update = action.get_update()
+            # Update the status bar if it's either started or in progress
+            if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
+                # This string contains the description of what it's going on
+                desc_action = ""
 
-            match action.action_type:
-                case ActionType.DELETE:
-                    desc_action = "Deleting"
-                case ActionType.MKDIR:
-                    desc_action = "Creating directory"
-                case ActionType.UPDATE | ActionType.COPY:
-                    desc_action = "Copying"
+                # Print information about transfer speed
+                transf_speed = ""
 
-                    if update is not None:
-                        more_info = f"[yellow]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
+                # Gets a precise label wrt the current action
+                match action.action_type:
+                    case ActionType.DELETE:
+                        desc_action = "Deleting"
+                    case ActionType.MKDIR:
+                        desc_action = "Creating directory"
+                    case ActionType.UPDATE | ActionType.COPY:
+                        desc_action = "Copying"
 
-            desc = f"{desc_action} {p} {more_info}"
-            this.update_status(desc)
+                        # get information about the update transfer speed
+                        update = action.update
+                        if update is not None:
+                            transf_speed = f"[green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
 
-            if update is not None:
-                this.update_progressbar(update)
+                # Compose the string to be displayed in the TUI
+                desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
 
-        this.update_table_row(action)
+                # Update the status label in the TUI
+                this.update_status(desc)
+
+                # Update the row in the table
+                this.update_table_row(action)
+        else:  # This means more files are processes that the same time (bulk operations)
+            if (len(event)>0):
+                for e in event:
+                    # Update the corresponding
+                    this.update_table_row(e.value)
+
+                desc = f"Processing [bold]{len(event)}[/] file(s)"
+
+                # The update param is set to the same value for global transfer speed. Getting the last one is fine
+                update = e.value.update
+
+                if update is not None:
+                    desc += f" [green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
+
+                this.update_status(desc)
+
 
 
     def after_synching(this, event:SyncEvent) -> None:
@@ -790,7 +843,9 @@ class FileTreeTable(DataTable):
 
     def adjust_column_sizes(this) -> None:
         psize = this.size.width-6
-        #psize = this.parent.size[0]
+
+        if this.virtual_size.height > this.size.height:
+            psize-=2 #thickness of the scrollbar
 
         tot_size=0
 
@@ -843,8 +898,7 @@ class FileTreeTable(DataTable):
         return this._results
 
     def show_results(this,results:List[SyncAction]) -> None:
-        for r in list(this.rows.keys())[::-1]:
-            this.remove_row(r)
+        this.clear(columns=False)
 
         this._results = results
 
@@ -855,7 +909,7 @@ class FileTreeTable(DataTable):
         this._results = sorted(this._results,key=lambda x : str(x.action_type))
 
         for i,x in enumerate(this._results):
-            rendered_row = FileTreeTable._render_row(x)
+            rendered_row = this._render_row(x)
             this.add_row(*rendered_row,key=str(i))
 
 
@@ -918,32 +972,6 @@ class FileTreeTable(DataTable):
                             action.direction = ActionDirection.DST2SRC
                         else:
                             action.action_type = ActionType.NOTHING
-
-
-
-
-                # case "right" | "left":
-                #     src2dst = event.name == "right"
-                #     #TODO: fix this to accommodate delete
-                #     if (action.action_type != ActionType.COPY):
-                #
-                #         action.direction = ActionDirection.SRC2DST if src2dst else ActionDirection.DST2SRC
-                #
-                #         if action.get_one_path.type == FileType.DIR:
-                #             action.action_type = ActionType.MKDIR
-                #         else:
-                #             action.action_type = ActionType.UPDATE if (src2dst and (action.a.exists)) or \
-                #                                                       (not src2dst and (action.b.exists))  \
-                #                                                    else ActionType.COPY
-                #     else:
-                #         if src2dst and (not action.b.exists):
-                #             action.action_type = ActionType.COPY
-                #             action.direction = ActionDirection.SRC2DST
-                #         elif not src2dst and (not action.a.exists):
-                #             action.action_type = ActionType.COPY
-                #             action.direction = ActionDirection.DST2SRC
-                #         else:
-                #             action.action_type = ActionType.NOTHING
                 case "delete":
                     action.action_type = ActionType.DELETE
 
@@ -966,8 +994,7 @@ class FileTreeTable(DataTable):
             this.app._update_job_related_interface()
 
 
-    @classmethod
-    def _render_row(cls,x:SyncAction):
+    def _render_row(this,x:SyncAction):
         match x.action_type:
             case ActionType.MKDIR | ActionType.COPY:
                 dir_frm = frm_src = frm_dest = "[green]"
@@ -1022,15 +1049,30 @@ class FileTreeTable(DataTable):
         src_column.overflow = dst_column.overflow = "ellipsis"
         src_column.no_wrap = dst_column.no_wrap = True
 
-        central_column = f"{dir_frm}{direction}[/]"
+
+        central_column = Text.from_markup(f"{dir_frm}{direction}[/]", justify="center")
+
+        progress_update = x.get_update()
 
         if (x.status == SyncStatus.SUCCESS):
-            central_column = ":white_heavy_check_mark:"
+            central_column = Text.from_markup(":white_heavy_check_mark:", justify="center")
         elif (x.status == SyncStatus.FAILED):
-            central_column = ":cross_mark:"
+            central_column = Text.from_markup(":cross_mark:", justify="center")
+        elif (x.status == SyncStatus.IN_PROGRESS) and (progress_update is not None):
+            central_column_size = this.ordered_columns[1].width
+            p = 0
+
+            # TODO: These updates need to be homogenised in the future
+            if (isinstance(progress_update, SyncProgress)):
+                p = progress_update.progress/100
+            elif (type(progress_update) == tuple):
+                p = progress_update[1] / 100
+
+            central_column = Bar((0,central_column_size*p),highlight_style="green1",background_style="dark_green")
+
 
         return (
             src_column,
-            Text.from_markup(central_column, justify="center"),
+            central_column,
             dst_column
         )
