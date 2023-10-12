@@ -146,10 +146,16 @@ subprocess.Popen = _wrap_Popen(subprocess.Popen)
 # The extract_rclone_progress within rclone_python is replaced with my version
 rclone_python.rclone.utils.extract_rclone_progress = improved_extract_rclone_progress
 
+@dataclass(frozen=True)
+class ActionProgress:
+    filename:str = ""
+    progress: float = 0
+    transfer_speed:str= ""
+    timestamp:datetime = datetime.now()
 
 @dataclass(frozen=True)
 class SyncProgress():
-    prog_transferring: str = ""
+    prog_transferring:[List[Any]|None] = None
     progress: float = 0
     total_bits: float = 0
     sent_bits: float = 0
@@ -167,6 +173,7 @@ class SyncProgress():
     @property
     def bytes_total(this):
         return convert_to_bytes(this.total_bits, this.unit_total)
+
 
 
 class SyncEvent:
@@ -272,8 +279,8 @@ class SyncAction(AbstractSyncAction):
         _trigger = _get_trigger_fn(eventhandler)
 
         def _update_internal_status(d: Dict):
-            this._update = SyncProgress(**d)
-            _trigger("on_synching", SyncEvent(this))
+            update = _parse_rclone_progress([this],this.direction,d)
+            _trigger("on_synching", SyncEvent(update))
 
         match this.action_type:
             case ActionType.MKDIR:
@@ -327,6 +334,14 @@ class SyncAction(AbstractSyncAction):
     def get_update(this) -> Union[SyncProgress | None]:
         return this._update
 
+    @property
+    def update(this):
+        return this.get_update()
+
+    @update.setter
+    def update(this, value):
+        this._update = value
+
 
 class BulkCopyAction(AbstractSyncAction):
 
@@ -370,62 +385,37 @@ class BulkCopyAction(AbstractSyncAction):
         def _update_internal_status(d:Dict) -> None:
             '''
             This internal function is used as callback function for the rclone_python copy function
-            The updates coming from there are formated and passed to the right SyncAction object
+            The updates coming from there are formatted and passed to the right SyncAction object
             :param d: Dictionary of updates as provided by rclone
             '''
 
             # Creates an object to format the dictionary provided by rclone_python with the current transfer update
-            update = SyncProgress(**d)
+            sync_update = _parse_rclone_progress(this._actions, this.direction,d)
 
-            current_time = datetime.now()
+            for current_action in sync_update.prog_transferring:
+                # Let's check if this action is a new one (this means that we are either at the very
+                # beginning or an action finished (either successfully or not)
 
-            # Each of the progress transferring is a tuple and I need to find the right SyncAction to update
-            for itm in update.prog_transferring:
+                if current_action not in this._actions_in_progress:
+                    # As this is an action that just started, its status is updated
+                    current_action.status = SyncStatus.IN_PROGRESS
+                    # And gets inside the club of actions in progress
+                    this._actions_in_progress.append(current_action)
 
-                current_action = None
 
-                for x in this._actions:
-                    # the source path depends on the direction of the action.
-                    # Whether to compare with x.a and x.b depends on where we are transfering from
-                    if (this.direction == ActionDirection.SRC2DST) and (x.a.relative_path.endswith(itm[0])):
-                        current_action = x
-                        break
-                    if (this.direction == ActionDirection.DST2SRC) and (x.b.relative_path.endswith(itm[0])):
-                        current_action = x
-                        break
-
-                # Lifeline in case no actions were not found. This might suggest there is a bug
-                # in the way paths are matched above or there's a change in the way rclone displays things
-                if (current_action is not None):
-                    # Let's update the found action with new information
-                    new_update = list(itm) # conver the tuple into a list
-                    new_update.append(current_time) # append the timestamp in case of timeout
-                    current_action.update = itm # The tuple with the update is provided as action update
-
-                    # Let's check if this action is a new one (this means that we are either at the very
-                    # beginning or an action finished (either successfully or not)
-
-                    if current_action not in this._actions:
-                        # As this is an action that just started, its status is updated
-                        current_action.status = SyncStatus.IN_PROGRESS
-                        # And gets inside the club of actions in progress
-                        this._actions.append(current_action)
-
-            for x in this._actions:
+            for x in this._actions_in_progress:
                 # if some actions have a time before the current_time value, it means that it doesn't
                 # appear in the stdout of rclone, ie it's done (no matter if it's successful or not)
-
-                # The timestamp is in the last position of the list update because it was done like that above
-                if (x.update[-1]<current_time):
+                if (x.update.timestamp<sync_update.timestamp):
                     x._check_success()
                     # Notify that this action is concluded
                     _trigger("on_synching",SyncEvent(x))
 
             # Filter out all the terminated actions
-            this._actions = [x for x in this._actions if x.status == SyncStatus.IN_PROGRESS]
+            this._actions_in_progress = [x for x in this._actions_in_progress if x.status == SyncStatus.IN_PROGRESS]
 
             # Notify that these actions are still in progress and send them as a list
-            _trigger(SyncEvent(this._actions))
+            _trigger("on_synching",SyncEvent(sync_update))
 
 
 
@@ -434,17 +424,23 @@ class BulkCopyAction(AbstractSyncAction):
 
         path = os.path.join(tmp_dir, tmp_fname)
 
+
         with open(path, "w") as handle:
             for x in this._actions:
                 fso = x.a if this.direction == ActionDirection.SRC2DST else x.b
-
-            handle.write(f"{fso.relative_path}\n")
+                handle.write(f"{fso.relative_path}\n")
 
         copy(this._root_source.absolute_path,
              this._root_destination.absolute_path,
              show_progress=show_progress,
              listener=_update_internal_status,
              args=['--files-from', path,'--no-check-dest '])
+
+        # Better double checking again when it's done if everything has been copied successfully
+        for itm in this._actions:
+            if itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]:
+                itm._check_success()
+                _trigger("on_synching", SyncEvent(itm))
 
 
 class RobinHoodBackend(ABC):
@@ -469,7 +465,7 @@ class RobinHoodBackend(ABC):
         ...
 
     @abstractmethod
-    def on_synching(this, event:Union[SyncEvent|Iterable[SyncEvent]]) -> None:
+    def on_synching(this, event:SyncEvent) -> None:
         ...
 
     @abstractmethod
@@ -697,7 +693,8 @@ def apply_changes(changes: Iterable[AbstractSyncAction],
 
     # here is where the real magic happens: all actions are applied
     for r in changes:
-        r.apply_action(show_progress=show_progress, eventhandler=eventhandler)
+        if not isinstance(r,SyncAction) or r.action_type != ActionType.NOTHING:
+            r.apply_action(show_progress=show_progress, eventhandler=eventhandler)
 
     _trigger("after_synching", SyncEvent())
 
@@ -764,6 +761,50 @@ def results_for_mirror(results: Iterable[SyncAction]) -> None:
                         case FileType.DIR:
                             action.action_type = ActionType.MKDIR
 
+def _parse_rclone_progress(actions:List[SyncAction], sync_direction: ActionDirection, output:Dict) -> SyncProgress:
+    '''
+    Creates a suitable SyncProgress and Action progress objects from the dictionary generated by rclone_python
+    :param actions: List of all actions treated during synchronisation
+    :param sync_direction: either source-to-destination or destination-to-source
+    :param output: rclone_python output coming in the form of a dictionary
+    :return: A SyncProgress object with all the information nicely formatted
+    '''
+
+    current_time = datetime.now()
+
+    individual_tasks = []
+
+    for task in output['prog_transferring']:
+        current_action = None
+
+        # The aim of this for-loop is to match the task in rclone with the internal represation of that task
+        # stored in a SyncAction within the list of actions
+        for x in actions:
+            # the source path depends on the direction of the action.
+            # Whether to compare with x.a and x.b depends on where we are transfering from
+            if (sync_direction == ActionDirection.SRC2DST) and (x.a.relative_path.endswith(task[0])):
+                current_action = x
+                break
+            if (sync_direction == ActionDirection.DST2SRC) and (x.b.relative_path.endswith(task[0])):
+                current_action = x
+                break
+
+        # if the action could not be found, something off is happening. All actions performed by rclone should
+        # be the ones the user approved. Alternatively, there's a bug in the way paths are matched above.
+        if current_action is not None:
+            local_progress = ActionProgress(filename=task[0],
+                                            progress=task[1],
+                                            transfer_speed=task[2],
+                                            timestamp=current_time)
+
+            current_action.update = local_progress
+
+            individual_tasks.append(current_action)
+
+    output['prog_transferring'] = individual_tasks
+
+
+    return SyncProgress(timestamp=current_time,**output)
 
 def kill_all_subprocesses():
     global _POPEN

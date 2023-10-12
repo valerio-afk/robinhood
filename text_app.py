@@ -758,68 +758,67 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def before_synching(this, event:SyncEvent) -> None:
         this.update_status(f"Initiating synchronisation ...")
 
-    def on_synching(this, event:Union[SyncEvent|Iterable[SyncEvent]]) -> None:
+    def on_synching(this, event:SyncEvent) -> None:
         # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
         this._check_running_status()
 
-        # If the event param is a list of a single element, I treat it as a single item and print detailed information
-        # about it
-        if (not isinstance(event,SyncEvent)) and (len(event)==1):
-            event = event.pop()
+        value = event.value
 
-        # Check if just one event arrived, or it's an iterable
-        if isinstance(event,SyncEvent):
-            # Take the current action from the event
-            action = event.value
+        if isinstance(value, SyncAction):
+            this.update_table_row(value)
 
-            # Get the relative path from either src or dest (it shouldn't matter - it's just for displaying purposes)
-            p = action.get_one_path.relative_path
+        elif isinstance(value,SyncProgress):
+            update = value
 
-            # Update the status bar if it's either started or in progress
-            if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
-                # This string contains the description of what it's going on
-                desc_action = ""
+            # Format information about transfer speed
+            transf_speed = f"[green]{update.transfer_speed} {update.transfer_speed_unit}[/green]"
 
-                # Print information about transfer speed
-                transf_speed = ""
+            if (update.prog_transferring is not None):
+                # If the action is just one, I can show more specific information about it
+                if len(update.prog_transferring) == 1:
+                    action = update.prog_transferring[0]
 
-                # Gets a precise label wrt the current action
-                match action.action_type:
-                    case ActionType.DELETE:
-                        desc_action = "Deleting"
-                    case ActionType.MKDIR:
-                        desc_action = "Creating directory"
-                    case ActionType.UPDATE | ActionType.COPY:
-                        desc_action = "Copying"
+                    # Get the relative path from either src or dest (it shouldn't matter - it's just for displaying purposes)
+                    p = action.get_one_path.relative_path
 
-                        # get information about the update transfer speed
-                        update = action.update
-                        if update is not None:
-                            transf_speed = f"[green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
+                    # Update the status bar if it's either started or in progress
+                    if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
+                        # Gets a precise label wrt the current action
+                        match action.action_type:
+                            case ActionType.DELETE:
+                                desc_action = "Deleting"
+                            case ActionType.MKDIR:
+                                desc_action = "Creating directory"
+                            case ActionType.UPDATE | ActionType.COPY:
+                                desc_action = "Copying"
+                            case _:
+                                desc_action = "Doing something with" # this case should never happen right?
 
-                # Compose the string to be displayed in the TUI
-                desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
+                        # Compose the string to be displayed in the TUI
+                        desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
 
-                # Update the status label in the TUI
-                this.update_status(desc)
+                        # Update the status label in the TUI
+                        this.update_status(desc)
 
-                # Update the row in the table
-                this.update_table_row(action)
-        else:  # This means more files are processes that the same time (bulk operations)
-            if (len(event)>0):
-                for e in event:
-                    # Update the corresponding
-                    this.update_table_row(e.value)
+                        # Update the row in the table
+                        this.update_table_row(action)
+                else:  # This means more files are processes that the same time (bulk operations)
 
-                desc = f"Processing [bold]{len(event)}[/] file(s)"
+                    for itm in update.prog_transferring:
+                        # Update the corresponding
+                        this.update_table_row(itm)
 
-                # The update param is set to the same value for global transfer speed. Getting the last one is fine
-                update = e.value.update
+                    desc = f"Processing [bold]{len(update.prog_transferring)}[/] file(s) {transf_speed}"
 
-                if update is not None:
-                    desc += f" [green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
+                    #TODO To show transfer speed somehow
 
-                this.update_status(desc)
+                    # The update param is set to the same value for global transfer speed. Getting the last one is fine
+                    # update = itm.update
+                    #
+                    # if update is not None:
+                    #     desc += f" [green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
+
+                    this.update_status(desc)
 
 
 
@@ -918,6 +917,8 @@ class FileTreeTable(DataTable):
     def update_action(this, action:SyncAction):
         if (this._results is None): return
 
+        # The _result property can be any iterable
+        # As I like the .index method, I convert it into a list if necessary
         results = this._results
 
         if (not isinstance(this._results,list)):
@@ -1060,13 +1061,7 @@ class FileTreeTable(DataTable):
             central_column = Text.from_markup(":cross_mark:", justify="center")
         elif (x.status == SyncStatus.IN_PROGRESS) and (progress_update is not None):
             central_column_size = this.ordered_columns[1].width
-            p = 0
-
-            # TODO: These updates need to be homogenised in the future
-            if (isinstance(progress_update, SyncProgress)):
-                p = progress_update.progress/100
-            elif (type(progress_update) == tuple):
-                p = progress_update[1] / 100
+            p = progress_update.progress/100
 
             central_column = Bar((0,central_column_size*p),highlight_style="green1",background_style="dark_green")
 
