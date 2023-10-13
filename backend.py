@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
 from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine, mkdir, convert_to_bytes, \
     LocalFileSystem
-from filesystem import PathManager
+from filesystem import AbstractPath
 from file_filters import UnixPatternExpasionFilter, RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
 from rclone_python.rclone import copy, delete
@@ -287,7 +287,8 @@ class SyncAction(AbstractSyncAction):
                 mkdir(this.get_one_path)
             case ActionType.DELETE:
                 try:
-                    delete(this.get_one_path.absolute_path)
+                    p = this.b if this.direction.SRC2DST else this.a
+                    delete(p.absolute_path)
                 except Exception:
                     this._status = SyncStatus.FAILED
             case ActionType.UPDATE | ActionType.COPY:
@@ -346,8 +347,8 @@ class SyncAction(AbstractSyncAction):
 class BulkCopyAction(AbstractSyncAction):
 
     def __init__(this,
-                 root_source: PathManager,
-                 root_dst: PathManager,
+                 root_source: AbstractPath,
+                 root_dst: AbstractPath,
                  direction: ActionDirection):
 
         super().__init__(direction)
@@ -642,8 +643,8 @@ def compare_tree(src: Union[str | FileSystem],
 
 
 def apply_changes(changes: Iterable[AbstractSyncAction],
-                  local: [PathManager|None] = None,
-                  remote: [PathManager|None] = None,
+                  local: [AbstractPath | None] = None,
+                  remote: [AbstractPath | None] = None,
                   eventhandler: [RobinHoodBackend | None] = None,
                   show_progress:bool=False
                   ) -> None:

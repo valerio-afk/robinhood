@@ -1,5 +1,3 @@
-#!python
-
 # Copyright (c) 2023 Valerio AFK <afk.broadcast@gmail.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -261,6 +259,14 @@ def open_tui(profile: Union[RobinHoodProfile | None] = None) -> None:
 
 
 def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_binary_flags=False) -> None:
+    '''
+    Adds some standard command line arguments related to synching
+    :param parser: The parser where these arguments need to be added
+    :param include_remote: Whether the 'remote' positional argument needs to be added (useful for dedupe)
+    :param extend_binary_flags: Adds other binary flags in opposition to others (e.g., add --hidden against --no-hidden)
+                                Useful to create/edit a profile
+    '''
+
     parser.add_argument("local", type=str, help="Local path", nargs="?")
 
     if include_remote:
@@ -284,11 +290,21 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
 
 
 def add_profile_args(parser: ArgumentParser) -> None:
+    '''
+    Adds a command line argument to get the name of a profile
+    :param parser:
+    :return:
+    '''
     parser.add_argument("-p", "--profile", type=str, required=False, default=None,
                         help="Load a synchronisation profile")
 
 
 def main() -> None:
+    '''
+    Program's entry point
+    '''
+
+    # Create a new command line argument parser
     parser = ArgumentParser()
 
     # Subparser container

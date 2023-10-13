@@ -15,7 +15,7 @@ from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
-from filesystem import get_rclone_remotes, PathManager, NTPathManager, fs_autocomplete, fs_auto_determine,sizeof_fmt
+from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
 from config import RobinHoodConfiguration, RobinHoodProfile
 
@@ -294,7 +294,7 @@ class RobinHoodRemoteList(Static):
         table.add_columns(*header)
 
         for r in this.remotes:
-            table.add_row(r[0],r[1]+NTPathManager.VOLUME_SEPARATOR+NTPathManager.PATH_SEPARATOR)
+            table.add_row(r[0], r[1] + NTAbstractPath.VOLUME_SEPARATOR + NTAbstractPath.PATH_SEPARATOR)
 
 
 class RobinHoodExcludePath(Static):
@@ -572,11 +572,12 @@ class RobinHood(App):
 
     @on(DataTable.RowHighlighted)
     def on_row_selected(this, event:DataTable.RowHighlighted) -> None:
-        index = int(event.row_key.value)
+        if event.row_key is not None:
+            index = int(event.row_key.value)
 
-        action = this._tree_pane[index]
+            action = this._tree_pane[index]
 
-        this._details_pane.show(action.a, action.b)
+            this._details_pane.show(action.a, action.b)
 
 
     @on(Button.Pressed,"#work_launcher")
@@ -636,8 +637,8 @@ class RobinHood(App):
     def _run_synch(this) -> None:
 
         # Makes source/destination Paths to help the bulk operation manager in apply_changes
-        source = PathManager.make_path(this.src)
-        destination = PathManager.make_path(this.dst) if this.syncmode != SyncMode.DEDUPE else None
+        source = AbstractPath.make_path(this.src)
+        destination = AbstractPath.make_path(this.dst) if this.syncmode != SyncMode.DEDUPE else None
 
         apply_changes(this._tree_pane.results,
                       local=source,
@@ -936,6 +937,9 @@ class FileTreeTable(DataTable):
 
     def on_key(this,event:events.Key):
 
+        if this._results is None:
+            return
+
         action = this._results[this.cursor_row]
 
         if (action is not None):
@@ -952,7 +956,7 @@ class FileTreeTable(DataTable):
                             else:
                                 action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
                     elif action.direction != ActionDirection.SRC2DST:
-                        if (action.action_type == ActionType.UPDATE) or \
+                        if (((action.action_type == ActionType.UPDATE) or action.action_type.COPY) and action.a.exists) or \
                            ((action.action_type == ActionType.DELETE) and (action.b.exists)) or \
                            (action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.SRC2DST
@@ -967,8 +971,8 @@ class FileTreeTable(DataTable):
                             else:
                                 action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
                     elif action.direction != ActionDirection.DST2SRC:
-                        if (action.action_type == ActionType.UPDATE) or \
-                           ((action.action_type == ActionType.DELETE) and (action.a.exists)) or \
+                        if (((action.action_type == ActionType.UPDATE) or action.action_type.COPY) and action.b.exists) or \
+                           ((action.action_type == ActionType.DELETE) and action.a.exists) or \
                            (action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.DST2SRC
                         else:
