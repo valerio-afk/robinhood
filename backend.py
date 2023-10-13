@@ -518,7 +518,7 @@ def find_dedupe_managed(path: Union[str | FileSystem],
 
     return actions
 
-def find_dedupe(path: Union[str | FileSystem],
+def find_dedupe_rclone(path: Union[str | FileSystem],
                 eventhandler: [RobinHoodBackend | None] = None
                 ) -> Iterable[SyncAction]:
     _trigger = _get_trigger_fn(eventhandler)

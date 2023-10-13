@@ -272,32 +272,70 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
                                 Useful to create/edit a profile
     '''
 
-    parser.add_argument("local", type=str, help="Local path", nargs="?")
+    parser.add_argument("local",
+                        type=str,
+                        help="Local path",
+                        nargs="?")
 
     if include_remote:
-        parser.add_argument("remote", type=str, help="Remote path", nargs="?")
+        parser.add_argument("remote",
+                            type=str,
+                            help="Remote path",
+                            nargs="?")
 
-    parser.add_argument("-e", "--exclude", metavar="EXPR", dest="exclude", nargs="*", type=str, default=None,
+    parser.add_argument("-e",
+                        "--exclude",
+                        metavar="EXPR",
+                        dest="exclude",
+                        nargs="*",
+                        type=str,
+                        default=None,
                         help="List of patterns to exclude")
 
     deep_search_group = parser.add_mutually_exclusive_group()
     hidden_files_group = parser.add_mutually_exclusive_group()
 
-    deep_search_group.add_argument("-d", "--deep", action="store_true", dest="deep", help="Compare also file content")
-    hidden_files_group.add_argument("-n", "--no-hidden", action="store_true", dest="exclude_hidden",
+    deep_search_group.add_argument("-d",
+                                   "--deep",
+                                   action="store_true",
+                                   dest="deep",
+                                   help="Compare also file content")
+
+    hidden_files_group.add_argument("-n",
+                                    "--no-hidden",
+                                    action="store_true",
+                                    dest="exclude_hidden",
                                     help="Exclude hidden files")
 
     if extend_binary_flags:
-        deep_search_group.add_argument("--no-deep", action="store_true", dest="no_deep",
+        deep_search_group.add_argument("--no-deep",
+                                       action="store_true",
+                                       dest="no_deep",
                                        help="Doesn't compare file content")
-        hidden_files_group.add_argument("--hidden", action="store_true", dest="include_hidden",
+        hidden_files_group.add_argument("--hidden",
+                                        action="store_true",
+                                        dest="include_hidden",
                                         help="Include hidden files")
 
 
     on_completion_group = parser.add_mutually_exclusive_group()
-    on_completion_group.add_argument("--on-completion", metavar="COMMAND", dest="on_completion",default=None, help="Run a command on completion")
-    on_completion_group.add_argument("--shutdown", dest="on_completion", action="store_const", const="SHUTDOWN", help="Shuts down the computer on completion")
-    on_completion_group.add_argument("--suspend", dest="on_completion", action="store_const", const="SUSPEND",help="Suspends the computer on completion")
+    on_completion_group.add_argument("--on-completion",
+                                     metavar="COMMAND",
+                                     dest="on_completion",
+                                     default=None,
+                                     help="Run a command on completion")
+
+    on_completion_group.add_argument("--shutdown",
+                                     dest="on_completion",
+                                     action="store_const",
+                                     const="SHUTDOWN",
+                                     help="Shuts down the computer on completion")
+    
+    on_completion_group.add_argument("--suspend",
+                                     dest="on_completion",
+                                     action="store_const",
+                                     const="SUSPEND",
+                                     help="Suspends the computer on completion")
 
 
 def add_profile_args(parser: ArgumentParser) -> None:

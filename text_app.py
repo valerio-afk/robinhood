@@ -14,7 +14,8 @@ from textual.widgets.data_table import Column
 from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
-from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
+from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
+from backend import find_dedupe_managed as find_dedupe
 from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
