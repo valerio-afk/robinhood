@@ -114,6 +114,9 @@ def make_configuration(args: Namespace) -> RobinHoodProfile:
     if args.exclude is not None:
         profile.exclusion_filters = args.exclude
 
+    if (args.on_completion is not None):
+        profile.on_completion = args.on_completion
+
     return profile
 
 
@@ -197,7 +200,8 @@ def action_profiles(args: Namespace) -> None:
             destination_path=args.remote,
             deep_comparisons=args.deep,
             exclusion_filters=args.exclude,
-            exclude_hidden_files=args.exclude_hidden
+            exclude_hidden_files=args.exclude_hidden,
+            on_completion=args.on_completion if args.on_completion is None else "NOTHING"
         )
 
         # The new profile is added to the configuration file
@@ -217,6 +221,7 @@ def action_profiles(args: Namespace) -> None:
             if args.local is not None: profile.source_path = args.local
             if args.remote is not None: profile.destination_path = args.remote
             if args.exclude is not None: profile.exclusion_filters = args.exclude
+            if args.on_completion is not None: profile.on_completion = args.on_completion
 
             if (args.deep):
                 profile.deep_comparisons = True
@@ -287,6 +292,12 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
                                        help="Doesn't compare file content")
         hidden_files_group.add_argument("--hidden", action="store_true", dest="include_hidden",
                                         help="Include hidden files")
+
+
+    on_completion_group = parser.add_mutually_exclusive_group()
+    on_completion_group.add_argument("--on-completion", metavar="COMMAND", dest="on_completion",default=None, help="Run a command on completion")
+    on_completion_group.add_argument("--shutdown", dest="on_completion", action="store_const", const="SHUTDOWN", help="Shuts down the computer on completion")
+    on_completion_group.add_argument("--suspend", dest="on_completion", action="store_const", const="SUSPEND",help="Suspends the computer on completion")
 
 
 def add_profile_args(parser: ArgumentParser) -> None:

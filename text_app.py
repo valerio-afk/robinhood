@@ -15,6 +15,7 @@ from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject, find_dedupe
+from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
 from config import RobinHoodConfiguration, RobinHoodProfile
@@ -572,8 +573,9 @@ class RobinHood(App):
 
     @on(DataTable.RowHighlighted)
     def on_row_selected(this, event:DataTable.RowHighlighted) -> None:
-        if event.row_key is not None:
-            index = int(event.row_key.value)
+
+        if event.cursor_row >= 0:
+            index = event.cursor_row #int(event.row_key.value)
 
             action = this._tree_pane[index]
 
@@ -645,6 +647,8 @@ class RobinHood(App):
                       remote=destination,
                       eventhandler=this._backend
         )
+
+
 
 
     def update_progressbar(this, update:Union[SyncProgress|SyncEvent]):
@@ -827,6 +831,9 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
         this.clean_up()
         this.update_status(f"[green]Synchronisation finished[/]")
 
+        cmd = make_command(this._gui.profile.on_completion)
+        cmd()
+
 
 class FileTreeTable(DataTable):
 
@@ -908,9 +915,13 @@ class FileTreeTable(DataTable):
 
         this._results = sorted(this._results,key=lambda x : str(x.action_type))
 
+        rendered_rows = [None] * len(this._results)
+
         for i,x in enumerate(this._results):
-            rendered_row = this._render_row(x)
-            this.add_row(*rendered_row,key=str(i))
+            rendered_rows[i] = this._render_row(x)
+
+        this.add_rows(rendered_rows)
+        #this.add_row(*rendered_row,key=str(i))
 
 
         this.focus()

@@ -31,6 +31,7 @@ class RobinHoodProfile:
     exclusion_filters:Union[List[str] | None] = None
     deep_comparisons:bool = False
     exclude_hidden_files:bool = False
+    on_completion:str = "NOTHING"
     sync_mode:SyncMode = SyncMode.UPDATE
 
     def __str__(this)->str:
@@ -38,7 +39,8 @@ class RobinHoodProfile:
                f"Destination Path: {this.destination_path}\n"\
                f"Deep search ....: {this.deep_comparisons}\n"\
                f"Filters ........: {this.exclusion_filters}\n"\
-               f"Exclude hidden .: {this.exclude_hidden_files}"
+               f"Exclude hidden .: {this.exclude_hidden_files}\n"\
+               f"On completion ..: {this.on_completion}"
 
     def to_json(this):
         return {
@@ -46,7 +48,8 @@ class RobinHoodProfile:
             "destination_path": this.destination_path,
             "exclusion_filters": this.exclusion_filters,
             "deep_comparisons": this.deep_comparisons,
-            "exclude_hidden_files": this.exclude_hidden_files
+            "exclude_hidden_files": this.exclude_hidden_files,
+            "on_completion": this.on_completion
         }
 
 

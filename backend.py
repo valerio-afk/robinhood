@@ -33,6 +33,7 @@ from datetime import datetime
 from rclone_python.rclone import copy, delete
 from config import RobinHoodProfile
 from platformdirs import site_cache_path
+from fnmatch import fnmatch
 import subprocess
 import re
 import rclone_python
@@ -300,7 +301,7 @@ class SyncAction(AbstractSyncAction):
                     y = this.a.containing_directory
 
                 this._status = SyncStatus.IN_PROGRESS
-                copy(x, y, show_progress=show_progress, listener=_update_internal_status, args=['--use-mmap'])
+                copy(x, y, show_progress=show_progress, listener=_update_internal_status, args=['--use-mmap', '--no-traverse'])
 
         this._check_success()
 
@@ -431,11 +432,17 @@ class BulkCopyAction(AbstractSyncAction):
                 fso = x.a if this.direction == ActionDirection.SRC2DST else x.b
                 handle.write(f"{fso.relative_path}\n")
 
-        copy(this._root_source.absolute_path,
-             this._root_destination.absolute_path,
+        a = this._root_source.absolute_path
+        b = this._root_destination.absolute_path
+
+        if this.direction == ActionDirection.DST2SRC:
+            a,b=b,a
+
+        copy(a,
+             b,
              show_progress=show_progress,
              listener=_update_internal_status,
-             args=['--files-from', path,'--no-check-dest '])
+             args=['--files-from', path,'--no-check-dest', '--no-traverse'])
 
         # Better double checking again when it's done if everything has been copied successfully
         for itm in this._actions:
@@ -473,6 +480,43 @@ class RobinHoodBackend(ABC):
     def after_synching(this, event: SyncEvent) -> None:
         ...
 
+def find_dedupe_managed(path: Union[str | FileSystem],
+                        eventhandler: [RobinHoodBackend | None] = None
+                        ) -> Iterable[SyncAction]:
+
+    _trigger = _get_trigger_fn(eventhandler)
+    _trigger("before_comparing", SyncEvent(path))
+
+    if (type(path) == str):
+        fs = fs_auto_determine(path, True)
+        fs.cached = True
+
+    fs.load()
+
+    actions = []
+    size_organiser = {}
+
+    for fso in fs.walk():
+        if (fso.type == FileType.REGULAR) and ((size:=fso.size) > 0):
+            l = size_organiser.setdefault(size,[])
+            l.append(fso)
+
+    size_organiser = {size:sorted(fsos) for size,fsos in size_organiser.items() if len(fsos)>1}
+
+    for i,fs_objs in enumerate(size_organiser.values()):
+        a = fs_objs[0]
+
+        _trigger("on_comparing", SyncEvent(a.relative_path, processed=i + 1, total=len(size_organiser)))
+
+        for j in range(1,len(fs_objs)):
+            b = fs_objs[j]
+
+            if a.checksum == b.checksum:
+                actions.append(SyncAction(a, b, ActionType.DELETE, ActionDirection.SRC2DST))
+
+    _trigger("after_comparing", SyncEvent(actions))
+
+    return actions
 
 def find_dedupe(path: Union[str | FileSystem],
                 eventhandler: [RobinHoodBackend | None] = None
@@ -642,7 +686,7 @@ def compare_tree(src: Union[str | FileSystem],
     return results
 
 
-def apply_changes(changes: Iterable[AbstractSyncAction],
+def apply_changes(changes: Iterable[SyncAction],
                   local: [AbstractPath | None] = None,
                   remote: [AbstractPath | None] = None,
                   eventhandler: [RobinHoodBackend | None] = None,
@@ -665,29 +709,30 @@ def apply_changes(changes: Iterable[AbstractSyncAction],
 
     if (local is not None) and (remote is not None):
         # Source to destination and Destination to source are managed separately
-        bulky_copy_src2dst = BulkCopyAction(local,remote,ActionDirection.SRC2DST)
-        bulky_copy_dst2src = BulkCopyAction(local, remote, ActionDirection.SRC2DST)
+        bulky_copy_src2dst = BulkCopyAction(local, remote, ActionDirection.SRC2DST)
+        bulky_copy_dst2src = BulkCopyAction(local, remote, ActionDirection.DST2SRC)
 
         # A list containing all the remaining actions that couldn't be bulked
         others = []
 
         # Check each action if it could be put inside one of the two copy bulks
         for itm in changes:
-            # Check the action direction
-            match itm.direction:
-                case ActionDirection.SRC2DST:
-                    try:
-                        # the add_action method raises an exception if the provided action is not bulkable
-                        bulky_copy_src2dst.add_action(itm)
-                    except ValueError:
-                        # in this case, it's another type of action that will be treated individually
-                        others.append(itm)
-                case ActionDirection.DST2SRC:
-                    # whatever happens here is the same as before, but in the opposite direction
-                    try:
-                        bulky_copy_dst2src.add_action(itm)
-                    except ValueError:
-                        others.append(itm)
+            if itm.action_type != ActionType.NOTHING:
+                # Check the action direction
+                match itm.direction:
+                    case ActionDirection.SRC2DST:
+                        try:
+                            # the add_action method raises an exception if the provided action is not bulkable
+                            bulky_copy_src2dst.add_action(itm)
+                        except ValueError:
+                            # in this case, it's another type of action that will be treated individually
+                            others.append(itm)
+                    case ActionDirection.DST2SRC:
+                        # whatever happens here is the same as before, but in the opposite direction
+                        try:
+                            bulky_copy_dst2src.add_action(itm)
+                        except ValueError:
+                            others.append(itm)
 
         # The changes list/iterable is updated with a list containing the two bulks and the other changes to apply
         changes = [bulky_copy_src2dst, bulky_copy_dst2src] + others
@@ -771,6 +816,9 @@ def _parse_rclone_progress(actions:List[SyncAction], sync_direction: ActionDirec
     :return: A SyncProgress object with all the information nicely formatted
     '''
 
+    # sometimes rclone puts ellipsis for long paths - either of these conditions is fine
+    match_path = lambda t,a: a.endswith(t) or fnmatch(a,t.replace("\u2026","*"))
+
     current_time = datetime.now()
 
     individual_tasks = []
@@ -783,10 +831,10 @@ def _parse_rclone_progress(actions:List[SyncAction], sync_direction: ActionDirec
         for x in actions:
             # the source path depends on the direction of the action.
             # Whether to compare with x.a and x.b depends on where we are transfering from
-            if (sync_direction == ActionDirection.SRC2DST) and (x.a.relative_path.endswith(task[0])):
+            if (sync_direction == ActionDirection.SRC2DST) and match_path(task[0],x.a.relative_path): #(x.a.relative_path.endswith(task[0])):
                 current_action = x
                 break
-            if (sync_direction == ActionDirection.DST2SRC) and (x.b.relative_path.endswith(task[0])):
+            if (sync_direction == ActionDirection.DST2SRC) and match_path(task[0],x.b.relative_path): #(x.b.relative_path.endswith(task[0])):
                 current_action = x
                 break
 

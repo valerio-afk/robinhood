@@ -441,6 +441,7 @@ class FileSystemObject:
         this.mtime = mtime
         this.hidden = hidden
         this._exists = exists
+        this._checksum = None
         # this.processed = False
 
     @property
@@ -518,6 +519,21 @@ class FileSystemObject:
         """
         this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(
             tzinfo=current_timezone())
+
+    @property
+    def checksum(this) -> str:
+        if this._checksum is None:
+            args = ["rclone", "hashsum", "md5", this.absolute_path]
+
+            if this.is_remote:
+                args.append(["--download"])
+
+            output = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            if output.returncode == 0:
+                this._checksum = output.stdout.decode().split(" ")[0]
+
+        return this._checksum
 
     def update_information(this) -> None:
         """Update the information about the file system object, eg size, modificafion time and its existance"""
@@ -868,6 +884,27 @@ class FileSystem(ABC):
         """
         return this._path.visit(path)
 
+
+    def walk(this, path:Union[AbstractPath | None] = None) -> Iterable[FileSystemObject]:
+        '''
+        Iterate over all files recusiverly from the path (if provided)
+        :param path: The path to start walking from. If not specified, the current working  directory is used
+        :return: A generator yielding FileSystemObjecs
+        '''
+        cwd = this.current_path if path is None else path
+
+        dirs = [cwd]
+
+        while len(dirs) > 0:
+            d = dirs.pop()
+
+            for fso in this.ls(d):
+                match fso.type:
+                    case FileType.DIR:
+                        dirs.append(fso.absolute_path)
+                    case FileType.REGULAR:
+                        yield fso
+
     def new_path(this, path: str, root: Union[str | None] = None) -> AbstractPath:
         return this._path_manager(path, root if root is not None else this.root)
 
@@ -927,6 +964,7 @@ class LocalFileSystem(FileSystem):
         # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
 
         return content
+
 
     def exists(this, filename):
         p = this.visit(filename)
