@@ -148,6 +148,20 @@ def action_mirror(args: Namespace) -> None:
 
     open_tui(profile)
 
+def action_sync(args: Namespace) -> None:
+    '''
+    Performs mirror synchronisation between local and remote (no changes in local)
+
+    :param args: Command-line arguments
+    '''
+
+    profile = make_configuration(args)
+    profile.sync_mode = SyncMode.SYNC
+
+    # TODO: all the batch work needs to be coded here
+
+    open_tui(profile)
+
 
 def action_dedupe(args: Namespace) -> None:
     '''
@@ -390,6 +404,13 @@ def main() -> None:
     add_sync_args(parser_mirror)
     add_profile_args(parser_mirror)
     parser_mirror.set_defaults(func=action_mirror)
+
+    # SYNC command
+    parser_sync = subparsers.add_parser("sync", help="Make remote folder as the local (only remote is changed)")
+
+    add_sync_args(parser_sync)
+    add_profile_args(parser_sync)
+    parser_sync.set_defaults(func=action_sync)
 
     # DEDUPE command
 

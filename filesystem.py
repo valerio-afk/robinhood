@@ -19,13 +19,14 @@
 # SOFTWARE.
 
 from __future__ import annotations
-from typing import Any, Union, List, Tuple, Type, Iterable
+from typing import Any, Union, List, Tuple, Type, Iterable, Dict
 from abc import ABC, abstractmethod
 from enum import Enum
 from rclone_python import rclone
-from datetime import datetime, timezone
+from datetime import datetime
 from copy import copy
 from psutil import disk_partitions
+from config import get_cache_file
 import os
 import re
 import stat
@@ -222,8 +223,7 @@ class AbstractPath(ABC):
                 r += paths[i]
             elif (xx and yy):
                 # if both have a slash, I remove the slash from the second part
-                # TODO: Use lstrip to strip more than one leading /
-                r += paths[i][1:]
+                r += paths[i].lstrip(" /")
             else:
                 # if neither of them has a slash, it's added
                 if (cls.is_relative(paths[i])):
@@ -346,18 +346,16 @@ class AbstractPath(ABC):
     def root(this, path: str) -> None:
         '''
         Set a new root to the Path
-        :param path: A n absolute path to the new root
-        :return:
+        :param path: An absolute path to the new root
         '''
         # when root is changed, the path needs to be re-rooted
-        # therefore, the old relative path needs to be store
+        # therefore, the old relative path needs to be stored
         # to be used later to re-root the whole thing
         old_relpath = this.relative_path
 
         this._basepath = this.normalise(path)
 
-        # It's important to check whether the new root is a parent directory of the previes one
-        # TODO: check what if this doesn't apply
+        # Not sure why this is here. It works - who cares. I should've put comments earlier.
         if (this.is_absolute(this._path)):
             this._path = this.join(this._basepath, old_relpath)
 
@@ -374,9 +372,8 @@ class AbstractPath(ABC):
             if (this.is_absolute(path)):
                 this._path = this.normalise(path)
             else:
-                # If it's relative, it gets normalised and joined
-                #TODO: use the .join method
-                new_path = this.normalise(this._path + this.PATH_SEPARATOR + path)
+                # If it's relative, it gets joined and then normalised
+                new_path = this.normalise(AbstractPath.join(this._path, path))
 
                 # if the new path (after normalisation) is still under the root, we keep it
                 # otherwise, if we are above the root (this can happen with a lot of ../../../)
@@ -421,10 +418,12 @@ class FileSystemObject:
     '''
     def __init__(this,
                  fullpath: Union[AbstractPath | None],
+                 *,
                  type: FileType,
                  size: Union[int | None],
                  mtime: Union[datetime | None],
                  exists: Union[bool | None] = None,
+                 checksum: Union[str | None] = None,
                  hidden: bool = False):
         """
         :param fullpath: Full path to the FS object
@@ -437,12 +436,10 @@ class FileSystemObject:
         this.fullpath = fullpath
         this.type = type
         this._size = size
-        this._mtime = None
-        this.mtime = mtime
+        this._mtime = mtime
         this.hidden = hidden
         this._exists = exists
-        this._checksum = None
-        # this.processed = False
+        this._checksum = checksum
 
     @property
     def absolute_path(this) -> str:
@@ -471,7 +468,7 @@ class FileSystemObject:
         :return: TRUE if it's in any of the remote drives, FALSE otherwise
         """
         for _, drive in get_rclone_remotes():
-            if this.path.startswith(drive):
+            if this.absolute_path.startswith(drive):
                 return True
         return False
 
@@ -509,6 +506,9 @@ class FileSystemObject:
     @property
     def mtime(this) -> Union[datetime | None]:
         """Gets the modification time of the filesystem object"""
+        if this._mtime is None:
+            this.update_information()
+
         return this._mtime
 
     @mtime.setter
@@ -535,6 +535,23 @@ class FileSystemObject:
 
         return this._checksum
 
+    def __eq__(this, other) -> bool:
+        if type(other) == str:
+            return (this.absolute_path == other) or (this.relative_path == other)
+        elif isinstance(other, FileSystemObject):
+            return this.relative_path == other.relative_path
+        else:
+            return False
+
+    def __hash__(this) -> int:
+        return hash(this.relative_path)
+
+    def __str__(this) -> str:
+        return this.relative_path
+
+    def __repr__(this) -> str:
+        return str(this)
+
     def update_information(this) -> None:
         """Update the information about the file system object, eg size, modificafion time and its existance"""
 
@@ -556,22 +573,27 @@ class FileSystemObject:
         else:
             this._exists = False
 
-    def __eq__(this, other) -> bool:
-        if type(other) == str:
-            return (this.absolute_path == other) or (this.relative_path == other)
-        elif isinstance(other, FileSystemObject):
-            return this.relative_path == other.relative_path
-        else:
-            return False
+    def to_dict(this) -> Dict[str,Any]:
+        return {
+            "path": this.relative_path,
+            "type": this.type.value,
+            "size": this.size,
+            "mtime": this.mtime.timestamp(),
+            "exists": this.exists,
+            "checksum": this._checksum,
+            "hidden": this.hidden
+        }
 
-    def __hash__(this) -> int:
-        return hash(this.relative_path)
 
-    def __str__(this) -> str:
-        return this.relative_path
+    @classmethod
+    def from_dict(cls, d:Dict[str,Any],*,mtime:Union[int|None] = None) -> FileSystemObject:
 
-    def __repr__(this) -> str:
-        return str(this)
+        d["mtime"] = mtime if d["mtime"] is None else d['mtime']
+
+        if d['mtime'] is not None:
+            d['mtime'] = datetime.fromtimestamp(d['mtime'])
+
+        return FileSystemObject(**d)
 
 
 class PathException(Exception):
@@ -739,21 +761,75 @@ class FileSystem(ABC):
         """
 
         :param path: The root path of the file system
-        :param path_manager: Path convension to use (POSIX- or NT-like)
+        :param path_manager: Path convention to use (POSIX- or NT-like)
         :param cached: Whether to cache content or not
-        :param force: Force the check the existance of the root directory
+        :param force: Force to check the existence of the root directory
         """
         this._path = path_manager(path)
         # Directory tree cache
-        this._cache: Any = []
-        this._path_manager = path_manager
-        this._cached = cached
+        this._tree_cache: Any = []
 
         # File System Object cache
-        this._file_objects = {}
+        this._file_objects_cache:Dict[str,FileSystemObject] = {}
+        this._previous_file_objects_cache: Dict[str, FileSystemObject] = {}
+
+
+        # The path manager is a concerete subtype of AbstractPath that is specialised in managing paths in
+        # specific environments/cases (e.g., POSIXPaths)
+        this._path_manager = path_manager
+
+        this._cached = cached
 
         if (not force) and (not this.exists(this.root)):
             raise FileNotFoundError(this.root)
+
+    @abstractmethod
+    def _load(this) -> None:
+        """
+        Loads the cache into memory.
+        This method needs to be implemented becaue each subclass can load and represents cache differently.
+        """
+        ...
+
+
+
+    @abstractmethod
+    def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
+        """
+        Finds a directory and its content in the cache
+        :param dir: directory to search in the cache
+        :return: An iterable if the directory exists, None otherwise
+        """
+        ...
+
+    @abstractmethod
+    def ls(this, path: Union[str | None] = None) -> Iterable[FileSystemObject]:
+        """
+        Returns the content of the path. If path is not provided, returns the content of the current working directory
+        :param path: The path where to list its content. None will return the content of the cwd
+        :return: An iterable of FileSystemObjects representing the content of the path
+        """
+        ...
+
+    @abstractmethod
+    def exists(this, filename) -> bool:
+        """
+        Checks if a file or directory exists
+        :param filename: File or directory name to check its existance
+        :return: TRUE if exists, FALSE otherwise
+        """
+        ...
+
+    @abstractmethod
+    def get_file(this, path: AbstractPath) -> FileSystemObject:
+        """
+        Returns a FileSystemObject from path. The FileSystemObject contains useful information about the file/directory
+        :param path: The path to get information from
+        :return: A FileSystemObject of representing path
+        """
+        ...
+
+
 
     @property
     def cached(this) -> bool:
@@ -783,49 +859,12 @@ class FileSystem(ABC):
         """
         return this.current_path
 
-    @abstractmethod
-    def _load(this) -> None:
-        """
-        Loads the cache into memory.
-        This method needs to be implemented becaue each subclass can load and represents cache differently.
-        """
-        ...
 
-    @abstractmethod
-    def ls(this, path: Union[str | None] = None) -> Iterable[FileSystemObject]:
-        """
-        Returns the content of the path. If path is not provided, returns the content of the current working directory
-        :param path: The path where to list its content. None will return the content of the cwd
-        :return: An iterable of FileSystemObjects representing the content of the path
-        """
-        ...
+    def __str__(this) -> str:
+        return this.current_path
 
-    @abstractmethod
-    def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
-        """
-        Finds a directory and its content in the cache
-        :param dir: directory to search in the cache
-        :return: An iterable if the directory exists, None otherwise
-        """
-        ...
-
-    @abstractmethod
-    def exists(this, filename) -> bool:
-        """
-        Checks if a file or directory exists
-        :param filename: File or directory name to check its existance
-        :return: TRUE if exists, FALSE otherwise
-        """
-        ...
-
-    @abstractmethod
-    def get_file(this, path: AbstractPath) -> FileSystemObject:
-        """
-        Returns a FileSystemObject from path. The FileSystemObject contains useful information about the file/directory
-        :param path: The path to get information from
-        :return: A FileSystemObject of representing path
-        """
-        ...
+    def __repr__(this) -> str:
+        return str(this)
 
     def _update_fso_in_cache(this, path: AbstractPath, fo: Union[FileSystemObject | None]) -> None:
         """
@@ -835,10 +874,10 @@ class FileSystem(ABC):
         """
         p = path.relative_path
         if fo is None:
-            if p in this._file_objects.keys():
-                del this._file_objects[p]
+            if p in this._file_objects_cache.keys():
+                del this._file_objects_cache[p]
         else:
-            this._file_objects[p] = fo
+            this._file_objects_cache[p] = fo
 
     def _get_fso_from_cache(this, path: AbstractPath) -> Union[FileSystemObject | None]:
         """
@@ -847,12 +886,34 @@ class FileSystem(ABC):
         :return: A file system object of the provided path, None if not found
         """
         p = path.relative_path
-        return this._file_objects[p] if p in this._file_objects.keys() else None
-    def __str__(this) -> str:
-        return this.current_path
+        return this._file_objects_cache[p] if p in this._file_objects_cache.keys() else None
 
-    def __repr__(this) -> str:
-        return str(this)
+    def _load_previous_file_system_objects_cache(this) -> None:
+        cache_filename = get_cache_file(this.root)
+
+        if not os.path.exists(cache_filename):
+            return
+
+        with open(cache_filename,'r') as h:
+            d = json.load(h)
+            if d['root'] != this.root:
+                return
+
+        files = d.setdefault('files',[])
+
+        fsos = {}
+
+        for f in files:
+            p = f['path']
+            del f['path']
+
+            f['fullpath'] = this.new_path(p)
+
+            fsos[p] = FileSystemObject.from_dict(f,mtime=d['timestamp'])
+
+        this._previous_file_objects_cache = fsos
+
+
 
 
     def load(this, force=True) -> None:
@@ -860,9 +921,15 @@ class FileSystem(ABC):
         Loads the cache into memory
         :param force: if TRUE, loads the cache even if the cache is full
         """
-        if force or (this._cache is None) or (len(this._cache) == 0):
-            if (not this.cached) or force:
-                this._load()
+
+        if force:
+            # load the file system object cache from a previous run
+            this._load_previous_file_system_objects_cache()
+            # manages the tree cache
+            if (this._tree_cache is None) or (len(this._tree_cache) == 0):
+                if (not this.cached) or force:
+                    this._load()
+
 
     def cd(this, path) -> None:
         """
@@ -906,7 +973,44 @@ class FileSystem(ABC):
                         yield fso
 
     def new_path(this, path: str, root: Union[str | None] = None) -> AbstractPath:
+        """
+        Return a new *AbstractPath object rooted `root` (if specified, else this.root is used instead)
+        :param path: A string representing a path
+        :param root: The root of this path. If not specified (None), this.root is used instead
+        :return: An *AbstractPath object representing path
+        """
         return this._path_manager(path, root if root is not None else this.root)
+
+
+    def flush_file_object_cache(this) -> None:
+        """
+        Flushes changes of the file system objects into cache
+        """
+
+        if not this.cached or (this._file_objects_cache is None) or (len(this._file_objects_cache) == 0):
+            return
+
+        keys = sorted(this._file_objects_cache.keys(),key=lambda path: (len(AbstractPath.split(path)), path))
+
+        fsos = [this._file_objects_cache[k].to_dict() for k in keys]
+
+        cache_filename = get_cache_file(this.root)
+
+        parent,_ = os.path.split(cache_filename)
+
+        if not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+
+        with open(cache_filename,"w") as h:
+            json.dump({
+                "root": this.root,
+                "timestamp":datetime.now().timestamp(),
+                "files": fsos
+                },h)
+
+
+
+
 
 
 class LocalFileSystem(FileSystem):

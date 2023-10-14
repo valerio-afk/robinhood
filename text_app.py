@@ -1,3 +1,23 @@
+# Copyright (c) 2023 Valerio AFK <afk.broadcast@gmail.com>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import os.path
 from typing import Dict,Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
@@ -15,7 +35,7 @@ from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
-from backend import find_dedupe_managed as find_dedupe
+from backend import find_dedupe
 from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
 from datetime import datetime
@@ -391,7 +411,7 @@ class RobinHood(App):
     BINDINGS =  [
                 Binding("ctrl+c", "quit", "Quit", priority=True),
                 Binding("ctrl+r","show_remotes","Toggle Remote"),
-                Binding("ctrl+p", "show_filters", "Toggle Path Filter List"),
+                Binding("ctrl+p", "show_filters", "Toggle Filter List"),
                 Binding("ctrl+t", "switch_paths", "Switch Source/Destination Path"),
                 Binding("ctrl+s","save_profile","Save profile")
     ]
@@ -608,33 +628,22 @@ class RobinHood(App):
             if  (this.syncmode != SyncMode.DEDUPE) and  (not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
                 return
 
-            match this.syncmode:
-                case SyncMode.UPDATE:
-                    this._run_update()
-                case SyncMode.MIRROR:
-                    this._run_mirror()
-                case SyncMode.DEDUPE:
-                    this._run_dedupe()
-                case _:
-                    raise NotImplementedError("Sync mode not implemented yet!")
+            if this.syncmode == SyncMode.DEDUPE:
+                this._run_dedupe()
+            else:
+                this._run_comparison(this.syncmode)
 
         this._update_job_related_interface()
 
-
     @work(exclusive=True,name="comparison",thread=True)
-    def _run_update(this) -> None:
-        result = compare_tree(this.src, this.dst, mode=SyncMode.UPDATE, profile=this.profile, eventhandler=this._backend)
-        this.show_results(result)
-
-    @work(exclusive=True,name="comparison",thread=True)
-    def _run_mirror(this) -> None:
-        result = compare_tree(this.src, this.dst, mode=SyncMode.MIRROR, profile=this.profile, eventhandler=this._backend)
-        this.show_results(result)
+    def _run_comparison(this, mode:SyncMode) -> None:
+        result = compare_tree(this.src, this.dst,mode=mode, profile=this.profile, eventhandler=this._backend)
+        this.call_from_thread(this.show_results, result)
 
     @work(exclusive=True, name="comparison", thread=True)
     def _run_dedupe(this) -> None:
         result = find_dedupe(this.src, this._backend)
-        this.show_results(result)
+        this.call_from_thread(this.show_results, result)
 
     @work(exclusive=True,name="synching",thread=True)
     def _run_synch(this) -> None:
@@ -815,15 +824,6 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                         this.update_table_row(itm)
 
                     desc = f"Processing [bold]{len(update.prog_transferring)}[/] file(s) {transf_speed}"
-
-                    #TODO To show transfer speed somehow
-
-                    # The update param is set to the same value for global transfer speed. Getting the last one is fine
-                    # update = itm.update
-                    #
-                    # if update is not None:
-                    #     desc += f" [green]{update.transfer_speed} {update.transfer_speed_unit}[/yellow]"
-
                     this.update_status(desc)
 
 
@@ -968,7 +968,7 @@ class FileTreeTable(DataTable):
                             else:
                                 action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
                     elif action.direction != ActionDirection.SRC2DST:
-                        if (((action.action_type == ActionType.UPDATE) or action.action_type.COPY) and action.a.exists) or \
+                        if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.a.exists) or \
                            ((action.action_type == ActionType.DELETE) and (action.b.exists)) or \
                            (action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.SRC2DST
@@ -983,7 +983,7 @@ class FileTreeTable(DataTable):
                             else:
                                 action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
                     elif action.direction != ActionDirection.DST2SRC:
-                        if (((action.action_type == ActionType.UPDATE) or action.action_type.COPY) and action.b.exists) or \
+                        if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.b.exists) or \
                            ((action.action_type == ActionType.DELETE) and action.a.exists) or \
                            (action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.DST2SRC

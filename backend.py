@@ -25,8 +25,7 @@ from typing import Union, List, Iterable, Callable, Dict, Tuple, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
-from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine, mkdir, convert_to_bytes, \
-    LocalFileSystem
+from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine, mkdir, convert_to_bytes
 from filesystem import AbstractPath
 from file_filters import UnixPatternExpasionFilter, RemoveHiddenFileFilter, FilterSet, FileFilter
 from datetime import datetime
@@ -288,7 +287,7 @@ class SyncAction(AbstractSyncAction):
                 mkdir(this.get_one_path)
             case ActionType.DELETE:
                 try:
-                    p = this.b if this.direction.SRC2DST else this.a
+                    p = this.b if this.direction == ActionDirection.SRC2DST else this.a
                     delete(p.absolute_path)
                 except Exception:
                     this._status = SyncStatus.FAILED
@@ -480,9 +479,18 @@ class RobinHoodBackend(ABC):
     def after_synching(this, event: SyncEvent) -> None:
         ...
 
-def find_dedupe_managed(path: Union[str | FileSystem],
+def find_dedupe(path: Union[str | FileSystem],
                         eventhandler: [RobinHoodBackend | None] = None
                         ) -> Iterable[SyncAction]:
+
+    """
+    Finds deduplicates files by matching hashes. This function is done without using `rclone dedupe` that is extremely
+    slow. It matches the checksum of files only when their sizes is the same.
+
+    :param path: Root path where to find deduplicate files
+    :param eventhandler:
+    :return:
+    """
 
     _trigger = _get_trigger_fn(eventhandler)
     _trigger("before_comparing", SyncEvent(path))
@@ -501,7 +509,7 @@ def find_dedupe_managed(path: Union[str | FileSystem],
             l = size_organiser.setdefault(size,[])
             l.append(fso)
 
-    size_organiser = {size:sorted(fsos) for size,fsos in size_organiser.items() if len(fsos)>1}
+    size_organiser = {size:sorted(fsos,key=lambda x : x.mtime.timestamp(),reverse=True) for size,fsos in size_organiser.items() if len(fsos)>1}
 
     for i,fs_objs in enumerate(size_organiser.values()):
         a = fs_objs[0]
@@ -518,69 +526,69 @@ def find_dedupe_managed(path: Union[str | FileSystem],
 
     return actions
 
-def find_dedupe_rclone(path: Union[str | FileSystem],
-                eventhandler: [RobinHoodBackend | None] = None
-                ) -> Iterable[SyncAction]:
-    _trigger = _get_trigger_fn(eventhandler)
-
-    _trigger("before_comparing", SyncEvent(path))
-
-    if (type(path) == str):
-        fs = fs_auto_determine(path, True)
-        fs.cached = True
-
-    fs.load()
-
-    cmdline_args = ['rclone', 'dedupe', fs.root, '--dedupe-mode', 'list']
-
-    if (isinstance(fs, LocalFileSystem)):
-        cmdline_args.append("--by-hash")
-
-    report = subprocess.run(cmdline_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    actions = []
-
-    if (report.returncode == 0):
-        stdout = report.stdout.decode().splitlines()
-
-        dedupes = {}
-
-        i = 0
-
-        while (i < len(stdout)):
-            line = stdout[i]
-
-            match = re.match(r"([0-9a-fA-F]+): ([\d]+) duplicates", line)
-
-            if match is not None:
-                hash = match[1]
-                n = int(match[2])
-
-                files = []
-
-                for j in range(1, n + 1):
-                    tokens = stdout[i + j].split(",")
-                    files.append(tokens[-1].strip())
-
-                i += n
-                dedupes[hash] = files[::-1]  # for some reason, what it seems to be the original file is the last
-
-            i += 1
-
-        for hashes, files in dedupes.items():
-
-            orig = fs.new_path(files[0])
-
-            for dup in files[1:]:
-                duplicate_filepath = fs.new_path(dup)
-                a = fs.get_file(orig)
-                b = fs.get_file(duplicate_filepath)
-
-                actions.append(SyncAction(a, b, ActionType.DELETE, ActionDirection.SRC2DST))
-
-        _trigger("after_comparing", SyncEvent(actions))
-
-    return actions
+# def find_dedupe_rclone(path: Union[str | FileSystem],
+#                 eventhandler: [RobinHoodBackend | None] = None
+#                 ) -> Iterable[SyncAction]:
+#     _trigger = _get_trigger_fn(eventhandler)
+#
+#     _trigger("before_comparing", SyncEvent(path))
+#
+#     if (type(path) == str):
+#         fs = fs_auto_determine(path, True)
+#         fs.cached = True
+#
+#     fs.load()
+#
+#     cmdline_args = ['rclone', 'dedupe', fs.root, '--dedupe-mode', 'list']
+#
+#     if (isinstance(fs, LocalFileSystem)):
+#         cmdline_args.append("--by-hash")
+#
+#     report = subprocess.run(cmdline_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+#
+#     actions = []
+#
+#     if (report.returncode == 0):
+#         stdout = report.stdout.decode().splitlines()
+#
+#         dedupes = {}
+#
+#         i = 0
+#
+#         while (i < len(stdout)):
+#             line = stdout[i]
+#
+#             match = re.match(r"([0-9a-fA-F]+): ([\d]+) duplicates", line)
+#
+#             if match is not None:
+#                 hash = match[1]
+#                 n = int(match[2])
+#
+#                 files = []
+#
+#                 for j in range(1, n + 1):
+#                     tokens = stdout[i + j].split(",")
+#                     files.append(tokens[-1].strip())
+#
+#                 i += n
+#                 dedupes[hash] = files[::-1]  # for some reason, what it seems to be the original file is the last
+#
+#             i += 1
+#
+#         for hashes, files in dedupes.items():
+#
+#             orig = fs.new_path(files[0])
+#
+#             for dup in files[1:]:
+#                 duplicate_filepath = fs.new_path(dup)
+#                 a = fs.get_file(orig)
+#                 b = fs.get_file(duplicate_filepath)
+#
+#                 actions.append(SyncAction(a, b, ActionType.DELETE, ActionDirection.SRC2DST))
+#
+#         _trigger("after_comparing", SyncEvent(actions))
+#
+#     return actions
 
 
 def compare_tree(src: Union[str | FileSystem],
@@ -589,53 +597,82 @@ def compare_tree(src: Union[str | FileSystem],
                  profile: RobinHoodProfile,
                  eventhandler: [RobinHoodBackend | None] = None
                  ) -> Iterable[SyncAction]:
+    """
+    Compare two directories and return differences according to the provided synching modality
+    :param src: Source directory
+    :param dest: Destination directory
+    :param mode: One of the following: Update, Mirror, Sync, Dedupe (see SyncMode Enum)
+    :param profile: A specific user profile
+    :param eventhandler: A class of the type RobinHoodBackend that listens to all the events made occurring the tree comparison
+    :return:
+    """
     _trigger = _get_trigger_fn(eventhandler)
 
     _trigger("before_comparing", SyncEvent(src))
+
+    # if the provided source path is a dir, then the function fs_auto_determine attempts to determine if it's local or remote
 
     if (type(src) == str):
         src = fs_auto_determine(src, True)
         src.cached = True
 
+    # Same as above, but with the destination path
     if (type(dest) == str):
         dest = fs_auto_determine(dest, True)
         dest.cached = True
 
-    # directories_to_visit = ['.']
-    # tree = []
+    # Loads both directories caches
 
     src.load()
     dest.load()
 
+    # Asks rclone to compute the differences betweeen those two directories
+    # TODO: implement deep search using rclone flags
     report = subprocess.run(['rclone', 'check', src.root, dest.root, '--combined', '-'], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
 
+    # Parse the result obtained  from rclone
     results = []
+
     files = report.stdout.decode().splitlines()
 
+    # for each line in the stdout
     for i, line in enumerate(files):
+        # for more information regarding the output of rclone check, please refer to https://rclone.org/commands/rclone_check/
         action, path = line.split(" ", maxsplit=1)
+
+        # Triggers the event that `path` is currently under examination
         _trigger("on_comparing", SyncEvent(path, processed=i + 1, total=len(files)))
 
+        # Converts the path (string) into an *AbstractPath
         src_path = src.new_path(path)
         dest_path = dest.new_path(path)
+
+        # Attempts to get a corresponding FileSystemObject from the provided path
 
         source_object = None
         dest_object = None
 
+        # The try-expect blocks are necessary because the file might not exist in one of the two sides
+
         try:
             source_object = src.get_file(src_path)
         except FileNotFoundError:
+            #TODO: check if it existed to perform suitable delete/move actions!
             ...
 
         try:
             dest_object = dest.get_file(dest_path)
         except FileNotFoundError:
+            #TODO: check if it existed to perform suitable delete/move actions!
             ...
 
+        # By default, it's assumed that the standard way to transfer files is from source -> destination
+        # Specific cases are treated below
         direction = ActionDirection.SRC2DST
 
         match action:
+            # + means file exists in source, not in destination
             case "+":
                 dest_object = FileSystemObject(fullpath=dest_path,
                                                type=source_object.type,
@@ -645,7 +682,7 @@ def compare_tree(src: Union[str | FileSystem],
                                                hidden=source_object.hidden)
 
                 action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
-
+            # - means file exists in destination, not in source
             case "-":
                 source_object = FileSystemObject(fullpath=src_path,
                                                  type=dest_object.type,
@@ -656,25 +693,31 @@ def compare_tree(src: Union[str | FileSystem],
 
                 action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR
                 direction = ActionDirection.DST2SRC
-
+            # * means file exists in both side but somehow differs - more needs to be done to determine what to copy where
+            #TODO: detects deleted/moved files from cache
             case "*":
-                if source_object.mtime >= dest_object.mtime:
+                if source_object.mtime.timestamp() >= dest_object.mtime.timestamp():
                     action = ActionType.UPDATE
                     direction = ActionDirection.SRC2DST
                 else:
                     action = ActionType.UPDATE
                     direction = ActionDirection.DST2SRC
-
+            # ! means there's been an error - maybe to leave this
             case "!":
                 action = ActionType.UNKNOWN
-
             case _:
                 action = ActionType.NOTHING
 
         results.append(SyncAction(source_object, dest_object, action, direction))
 
+    # Flush file info to cache
+    src.flush_file_object_cache()
+    dest.flush_file_object_cache()
+
+    # Filter results utilising user-defined filters
     results = filter_results(results, profile)
 
+    # Fix actions according to sync mode
     match mode:
         case SyncMode.UPDATE:
             results_for_update(results)
