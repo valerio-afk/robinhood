@@ -117,6 +117,9 @@ def make_configuration(args: Namespace) -> RobinHoodProfile:
     if (args.on_completion is not None):
         profile.on_completion = args.on_completion
 
+    if args.clear_cache:
+        profile.clear_cache()
+
     return profile
 
 
@@ -305,6 +308,8 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
                         type=str,
                         default=None,
                         help="List of patterns to exclude")
+
+    parser.add_argument("--clear-cache",action="store_true",dest="clear_cache",help="Clear file tree structure cache")
 
     deep_search_group = parser.add_mutually_exclusive_group()
     hidden_files_group = parser.add_mutually_exclusive_group()

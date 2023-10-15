@@ -870,7 +870,7 @@ class FileSystem(ABC):
         """
         Sets updated information of a specific file system object
         :param path: Path of the file/directory
-        :param fo: Updated information
+        :param fo: Updated information. If None, the entry in the cache will be removed
         """
         p = path.relative_path
         if fo is None:
@@ -914,7 +914,25 @@ class FileSystem(ABC):
         this._previous_file_objects_cache = fsos
 
 
+    def get_previous_version(this,path:AbstractPath, match_fullpath=True) -> Union[FileSystemObject|None]:
+        """
+        Finds a file system object inside the cache obtained from a previous run of the program
+        :param path: Path of the file to check if it was previously found
+        :param match_fullpath: If TRUE, if compares the full relative path. If FALSE, just the file name
+                               As there could be multiple matches, only the first one will be returned
+        :return:
+        """
+        if match_fullpath:
+            p = path.relative_path
+            return this._previous_file_objects_cache[p] if p in this._previous_file_objects_cache.keys() else None
+        else:
+            fname = AbstractPath.split(path.absolute_path)[-1]
 
+            for p,fso in this._previous_file_objects_cache.items():
+                if os.path.split(p)[-1] == fname:
+                    return fso
+
+            return None
 
     def load(this, force=True) -> None:
         """
@@ -1209,7 +1227,7 @@ class RemoteFileSystem(FileSystem):
                                mtime=datetime.fromisoformat(mod_time),
                                exists=True)
 
-        if (this.cached):
+        if this.cached:
             this._update_fso_in_cache(fullpath, fso)
 
         return fso

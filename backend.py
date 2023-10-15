@@ -658,14 +658,15 @@ def compare_tree(src: Union[str | FileSystem],
         try:
             source_object = src.get_file(src_path)
         except FileNotFoundError:
-            #TODO: check if it existed to perform suitable delete/move actions!
             ...
 
         try:
             dest_object = dest.get_file(dest_path)
         except FileNotFoundError:
-            #TODO: check if it existed to perform suitable delete/move actions!
             ...
+
+        past_source_object = src.get_previous_version(src_path)
+        past_dest_object = dest.get_previous_version(dest_path)
 
         # By default, it's assumed that the standard way to transfer files is from source -> destination
         # Specific cases are treated below
@@ -681,7 +682,26 @@ def compare_tree(src: Union[str | FileSystem],
                                                exists=False,
                                                hidden=source_object.hidden)
 
-                action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
+                # if the file has been found in source but not in dest, the following cases apply:
+                # 1- Never existed (has been added in source)
+                # 2- Existed (ie has been deleted from dest)
+                # 3- Existed (ie moved to a different location preserving its name)
+
+                # Case 1
+                if (past_dest_object is None) or (not past_dest_object.exists):
+                    action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
+                # Other cases
+                else:
+                    # The presence of a past_dest_object doesn't necessary mean it actually existed. Let's doublecheck it
+                    if past_dest_object.exists:
+                        # Case 2: if paths coincides, it's been deleted
+                        if source_object.relative_path == past_dest_object.relative_path:
+                            action = ActionType.DELETE
+                            direction = ActionDirection.DST2SRC
+                        else:
+                            # Case 3: it's been moved
+                            NotImplementedError("Not yet mate!")
+
             # - means file exists in destination, not in source
             case "-":
                 source_object = FileSystemObject(fullpath=src_path,
@@ -691,8 +711,21 @@ def compare_tree(src: Union[str | FileSystem],
                                                  exists=False,
                                                  hidden=dest_object.hidden)
 
-                action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR
-                direction = ActionDirection.DST2SRC
+                # Case 1
+                if (past_source_object is None) or (not past_source_object.exists):
+                    direction = ActionDirection.DST2SRC
+                    action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR
+                # Other cases
+                else:
+                    # The presence of a past_dest_object doesn't necessary mean it actually existed. Let's doublecheck it
+                    if past_source_object.exists:
+                        # Case 2: if paths coincides, it's been deleted
+                        if dest_object.relative_path == past_source_object.relative_path:
+                            action = ActionType.DELETE
+                        else:
+                            # Case 3: it's been moved
+                            NotImplementedError("Not yet mate!")
+
             # * means file exists in both side but somehow differs - more needs to be done to determine what to copy where
             #TODO: detects deleted/moved files from cache
             case "*":
@@ -711,6 +744,7 @@ def compare_tree(src: Union[str | FileSystem],
         results.append(SyncAction(source_object, dest_object, action, direction))
 
     # Flush file info to cache
+    # TODO: Flush cache after sync is over
     src.flush_file_object_cache()
     dest.flush_file_object_cache()
 

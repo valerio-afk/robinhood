@@ -101,6 +101,18 @@ class RobinHoodProfile:
             "on_completion": this.on_completion
         }
 
+    def clear_cache(this):
+
+        paths = [this.source_path, this.destination_path]
+
+        for p in paths:
+            if p is not None:
+                try:
+                    f = get_cache_file(p)
+                    os.unlink(f)
+                except FileNotFoundError:
+                    ...
+
 
 
 class RobinHoodConfiguration:
