@@ -1,6 +1,7 @@
 import subprocess
 from dataclasses import dataclass
 from filesystem import is_windows
+from sys import platform
 @dataclass
 class RunCommand:
     command:str
@@ -27,7 +28,14 @@ class  NoCommand(RunCommand):
 class ShutdownCommand(RunCommand):
 
     def __init__(this):
-        cmd = "shutdown /s /t 0" if is_windows() else "systemctl poweroff"
+        if platform.startswith("linux"):
+            cmd = "systemctl poweroff"
+        elif platform.startswith("win"):
+            cmd = "shutdown /s /t 0"
+        elif platform.startswith("darwin"):
+            cmd = 'osascript -e tell app "System Events" to shut down'
+        else:
+            cmd = ""
         super().__init__(cmd)
 
     def __str__(this):
@@ -36,7 +44,14 @@ class ShutdownCommand(RunCommand):
 class SupendCommand(RunCommand):
 
     def __init__(this):
-        cmd = "shutdown /d /t 0" if is_windows() else "systemctl suspend"
+        if platform.startswith("linux"):
+            cmd = "systemctl suspend"
+        elif platform.startswith("win"):
+            cmd = "shutdown /d /t 0"
+        elif platform.startswith("darwin"):
+            cmd = "pmset sleepnow"
+        else:
+            cmd = ""
         super().__init__(cmd)
 
     def __str__(this):
