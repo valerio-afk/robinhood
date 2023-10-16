@@ -7,7 +7,7 @@ class SyncMode(Enum):
 
 class ActionType(Enum):
     NOTHING:int=0
-    MKDIR:int=1
+    # MKDIR:int=1
     COPY:int=2
     UPDATE:int=3
     DELETE:int=4

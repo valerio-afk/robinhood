@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from __future__ import annotations
 import os.path
 from typing import Union, List, Iterable, Callable, Dict, Tuple, Any
 from dataclasses import dataclass
@@ -212,7 +213,13 @@ def _get_trigger_fn(eventhandler: Union[SyncEvent | None] = None) -> Callable[[s
 
 class AbstractSyncAction(ABC):
 
-    def __init__(this, direction: Union[ActionDirection | None] = None):
+    def __init__(this,
+                 a: FileSystemObject,
+                 b: FileSystemObject,
+                 direction: Union[ActionDirection | None] = None):
+
+        this.a = a
+        this.b = b
         this.direction = direction
         this._status = SyncStatus.NOT_STARTED
 
@@ -238,9 +245,7 @@ class SyncAction(AbstractSyncAction):
                  timeout=60
                  ):
 
-        super().__init__(direction)
-        this.a = a
-        this.b = b
+        super().__init__(a=a,b=b,direction=direction)
         this.action_type = action_type
         this._update = None
         this._timeout = timeout
@@ -251,8 +256,8 @@ class SyncAction(AbstractSyncAction):
         match (this.action_type):
             case ActionType.NOTHING:
                 return '-'
-            case ActionType.MKDIR:
-                return 'D'
+            # case ActionType.MKDIR:
+            #     return 'D'
             case ActionType.COPY:
                 return '*'
             case ActionType.UPDATE:
@@ -283,8 +288,8 @@ class SyncAction(AbstractSyncAction):
             _trigger("on_synching", SyncEvent(update))
 
         match this.action_type:
-            case ActionType.MKDIR:
-                mkdir(this.get_one_path)
+            # case ActionType.MKDIR:
+            #     mkdir(this.get_one_path)
             case ActionType.DELETE:
                 try:
                     p = this.b if this.direction == ActionDirection.SRC2DST else this.a
@@ -321,8 +326,8 @@ class SyncAction(AbstractSyncAction):
                 x, y = y, x
 
             match this.action_type:
-                case ActionType.MKDIR:
-                    success = y.exists
+                # case ActionType.MKDIR:
+                #     success = y.exists
                 case ActionType.UPDATE | ActionType.COPY:
                     success = y.exists and (x.size == y.size)
                 case ActionType.DELETE:
@@ -344,36 +349,77 @@ class SyncAction(AbstractSyncAction):
         this._update = value
 
 
-class BulkCopyAction(AbstractSyncAction):
+class SynchingManager():
+    """
+    This class manages the application of each action between source and destination directories
+    """
+
+    def __init__(this, source:FileSystem, destination:FileSystem):
+        this.source = source
+        this.destination = destination
+
+        this._changes = []
+
+    def __iter__(this) -> Iterable:
+        return iter(this._changes)
+    def __len__(this) -> int:
+        return len(this._changes)
+
+    def __getitem__(this, item:int) -> AbstractSyncAction:
+        return this._changes[item]
+
+    def clear(this) -> None:
+        this._changes = []
+
+    def remove_action(this, action:AbstractSyncAction) -> None:
+        this._changes.remove(action)
+
+    def add_action(this, action: AbstractSyncAction) -> None:
+        src_path = this.source.root
+        dst_path = this.destination.root
+
+        # Check if the paths in the provided action are rooted properly in both source and dest directories
+        if not AbstractPath.is_root_of(action.a.absolute_path,src_path): #this._root_source.is_under_root(action.a.absolute_path):
+            raise ValueError(f"The file '{action.a.relative_path} 'is not in '{src_path}'")
+
+        if not AbstractPath.is_root_of(action.b.absolute_path,dst_path): #this._root_destination.is_under_root(action.b.absolute_path):
+            raise ValueError(f"The file '{action.b.relative_path} 'is not in '{dst_path}'")
+
+        this._changes.append(action)
+
+
+    def sort(this,**kwargs) -> None:
+        this._changes.sort(**kwargs)
+
+
+    def apply_changes(this, show_progress:bool=False, eventhandler: [SyncEvent | None] = None) -> None:
+        for x in this._changes:
+            #TODO: add changes to the cache of the file systems - I have done all this mess for this reason
+            x.apply_action(show_progress, eventhandler)
+
+class BulkCopySynchingManager(SynchingManager):
 
     def __init__(this,
-                 root_source: AbstractPath,
-                 root_dst: AbstractPath,
+                 source:FileSystem,
+                 destination:FileSystem,
                  direction: ActionDirection):
 
-        super().__init__(direction)
+        super().__init__(source, destination)
 
-        this._actions: List[SyncAction] = []
-        this._root_source = root_source
-        this._root_destination = root_dst
+        this._direction = direction
         this._actions_in_progress = []
 
     def add_action(this, action: SyncAction) -> None:
-        if not this._root_source.is_under_root(action.a.absolute_path):
-            raise ValueError(f"The file '{action.a.relative_path} 'is not in '{this._root_source}'")
-
-        if not this._root_destination.is_under_root(action.b.absolute_path):
-            raise ValueError(f"The file '{action.b.relative_path} 'is not in '{this._root_destination}'")
 
         if action.action_type not in [ActionType.COPY, ActionType.UPDATE]:
             raise ValueError("The provided action is not copying or updating a file")
 
-        if (action.direction != this.direction):
+        if (action.direction != this._direction):
             raise ValueError("The provided action is towards a different synching direction")
 
-        this._actions.append(action)
+        super().add_action(action)
 
-    def apply_action(this, show_progress:bool=False, eventhandler: [SyncEvent | None] = None) -> None:
+    def apply_changes(this, show_progress:bool=False, eventhandler: [SyncEvent | None] = None) -> None:
         '''
         Applies bulk copy/update actions to destionation directory
         :param show_progress: A boolean representing whether to show the progress bar or not (useful for batch processes)
@@ -390,8 +436,9 @@ class BulkCopyAction(AbstractSyncAction):
             :param d: Dictionary of updates as provided by rclone
             '''
 
+
             # Creates an object to format the dictionary provided by rclone_python with the current transfer update
-            sync_update = _parse_rclone_progress(this._actions, this.direction,d)
+            sync_update = _parse_rclone_progress(this._changes, this._direction,d)
 
             for current_action in sync_update.prog_transferring:
                 # Let's check if this action is a new one (this means that we are either at the very
@@ -427,14 +474,15 @@ class BulkCopyAction(AbstractSyncAction):
 
 
         with open(path, "w") as handle:
-            for x in this._actions:
-                fso = x.a if this.direction == ActionDirection.SRC2DST else x.b
+            for x in this:
+                fso = x.a if this._direction == ActionDirection.SRC2DST else x.b
                 handle.write(f"{fso.relative_path}\n")
 
-        a = this._root_source.absolute_path
-        b = this._root_destination.absolute_path
 
-        if this.direction == ActionDirection.DST2SRC:
+        a = this.source.root
+        b = this.destination.root
+
+        if this._direction == ActionDirection.DST2SRC:
             a,b=b,a
 
         copy(a,
@@ -444,11 +492,10 @@ class BulkCopyAction(AbstractSyncAction):
              args=['--files-from', path,'--no-check-dest', '--no-traverse'])
 
         # Better double checking again when it's done if everything has been copied successfully
-        for itm in this._actions:
+        for itm in this:
             if itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]:
                 itm._check_success()
                 _trigger("on_synching", SyncEvent(itm))
-
 
 class RobinHoodBackend(ABC):
     '''This class manages the communication between the backend and frontend
@@ -596,7 +643,7 @@ def compare_tree(src: Union[str | FileSystem],
                  mode: SyncMode.UPDATE,
                  profile: RobinHoodProfile,
                  eventhandler: [RobinHoodBackend | None] = None
-                 ) -> Iterable[SyncAction]:
+                 ) -> SynchingManager:
     """
     Compare two directories and return differences according to the provided synching modality
     :param src: Source directory
@@ -632,7 +679,7 @@ def compare_tree(src: Union[str | FileSystem],
                             stderr=subprocess.PIPE)
 
     # Parse the result obtained  from rclone
-    results = []
+    sync_changes = SynchingManager(src , dest)
 
     files = report.stdout.decode().splitlines()
 
@@ -689,7 +736,7 @@ def compare_tree(src: Union[str | FileSystem],
 
                 # Case 1
                 if (past_dest_object is None) or (not past_dest_object.exists):
-                    action = ActionType.COPY if source_object.type == FileType.REGULAR else ActionType.MKDIR
+                    action = ActionType.COPY #if source_object.type == FileType.REGULAR else ActionType.MKDIR
                 # Other cases
                 else:
                     # The presence of a past_dest_object doesn't necessary mean it actually existed. Let's doublecheck it
@@ -714,7 +761,7 @@ def compare_tree(src: Union[str | FileSystem],
                 # Case 1
                 if (past_source_object is None) or (not past_source_object.exists):
                     direction = ActionDirection.DST2SRC
-                    action = ActionType.COPY if dest_object.type == FileType.REGULAR else ActionType.MKDIR
+                    action = ActionType.COPY #if dest_object.type == FileType.REGULAR else ActionType.MKDIR
                 # Other cases
                 else:
                     # The presence of a past_dest_object doesn't necessary mean it actually existed. Let's doublecheck it
@@ -741,31 +788,28 @@ def compare_tree(src: Union[str | FileSystem],
             case _:
                 action = ActionType.NOTHING
 
-        results.append(SyncAction(source_object, dest_object, action, direction))
+        sync_changes.add_action(SyncAction(source_object, dest_object, action, direction))
 
     # Flush file info to cache
-    # TODO: Flush cache after sync is over
     src.flush_file_object_cache()
     dest.flush_file_object_cache()
 
     # Filter results utilising user-defined filters
-    results = filter_results(results, profile)
+    filter_results(sync_changes, profile)
 
     # Fix actions according to sync mode
     match mode:
         case SyncMode.UPDATE:
-            results_for_update(results)
+            results_for_update(sync_changes)
         case SyncMode.MIRROR:
-            results_for_mirror(results)
+            results_for_mirror(sync_changes)
 
-    _trigger("after_comparing", SyncEvent(results))
+    _trigger("after_comparing", SyncEvent(sync_changes))
 
-    return results
+    return sync_changes
 
 
-def apply_changes(changes: Iterable[SyncAction],
-                  local: [AbstractPath | None] = None,
-                  remote: [AbstractPath | None] = None,
+def apply_changes(changes: SynchingManager,
                   eventhandler: [RobinHoodBackend | None] = None,
                   show_progress:bool=False
                   ) -> None:
@@ -782,15 +826,23 @@ def apply_changes(changes: Iterable[SyncAction],
     # Triggers the before_synching event
     _trigger("before_synching", SyncEvent())
 
-    # If both local and remote paths are provided, action grouping is possible
+    change_list = [changes]
 
-    if (local is not None) and (remote is not None):
+    # If both local and remote paths are provided, action grouping is possible
+    if (changes.source is not None) and (changes.destination is not None):
         # Source to destination and Destination to source are managed separately
-        bulky_copy_src2dst = BulkCopyAction(local, remote, ActionDirection.SRC2DST)
-        bulky_copy_dst2src = BulkCopyAction(local, remote, ActionDirection.DST2SRC)
+        # src_path = changes.source.new_path(changes.source.root)
+        # dst_path = changes.destination.new_path(changes.destination.root)
+
+        bulky_copy_src2dst = BulkCopySynchingManager(changes.source,
+                                                     changes.destination,
+                                                     direction=ActionDirection.SRC2DST)
+        bulky_copy_dst2src = BulkCopySynchingManager(changes.source,
+                                                     changes.destination,
+                                                     direction=ActionDirection.DST2SRC)
 
         # A list containing all the remaining actions that couldn't be bulked
-        others = []
+        other_actions = SynchingManager(changes.source, changes.destination)
 
         # Check each action if it could be put inside one of the two copy bulks
         for itm in changes:
@@ -803,26 +855,26 @@ def apply_changes(changes: Iterable[SyncAction],
                             bulky_copy_src2dst.add_action(itm)
                         except ValueError:
                             # in this case, it's another type of action that will be treated individually
-                            others.append(itm)
+                            other_actions.add_action(itm)
                     case ActionDirection.DST2SRC:
                         # whatever happens here is the same as before, but in the opposite direction
                         try:
                             bulky_copy_dst2src.add_action(itm)
                         except ValueError:
-                            others.append(itm)
+                            other_actions.add_action(itm)
 
         # The changes list/iterable is updated with a list containing the two bulks and the other changes to apply
-        changes = [bulky_copy_src2dst, bulky_copy_dst2src] + others
+        change_list = [bulky_copy_src2dst, bulky_copy_dst2src, other_actions ]
 
     # here is where the real magic happens: all actions are applied
-    for r in changes:
-        if not isinstance(r,SyncAction) or r.action_type != ActionType.NOTHING:
-            r.apply_action(show_progress=show_progress, eventhandler=eventhandler)
+    for r in change_list:
+        #if not isinstance(r,SyncAction) or r.action_type != ActionType.NOTHING:
+        r.apply_changes(show_progress=show_progress, eventhandler=eventhandler)
 
     _trigger("after_synching", SyncEvent())
 
 
-def filter_results(results: Iterable[SyncAction], profile: RobinHoodProfile) -> Iterable[SyncAction]:
+def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
     exclusion_filters = profile.exclusion_filters
     filters: List[FileFilter] = []
 
@@ -835,13 +887,17 @@ def filter_results(results: Iterable[SyncAction], profile: RobinHoodProfile) -> 
     if (len(filters) > 0):
         filter_set = FilterSet(*filters)
 
-        results = filter_set(results, key=lambda x: x.a)
-        results = filter_set(results, key=lambda x: x.b)
+        actions_to_remove = []
 
-    return results
+        for x in changes:
+            if filter_set.filter(x.a) or filter_set.filter(x.b):
+                actions_to_remove.append(x)
+
+        for x in actions_to_remove:
+            changes.remove_action(x)
 
 
-def results_for_update(results: Iterable[SyncAction]) -> None:
+def results_for_update(results: SynchingManager) -> None:
     for action in results:
         src = action.a
         dest = action.b
@@ -856,17 +912,18 @@ def results_for_update(results: Iterable[SyncAction]) -> None:
                     dest_mtime = dest.mtime
                     if src_mtime.timestamp() > dest_mtime.timestamp():
                         action.direction = ActionDirection.SRC2DST
-
-                        match src.type:
-                            case FileType.REGULAR:
-                                action.action_type = ActionType.UPDATE
-                            case FileType.DIR:
-                                action.action_type = ActionType.MKDIR
+                        action.action_type = ActionType.UPDATE
+                        #
+                        # match src.type:
+                        #     case FileType.REGULAR:
+                        #
+                        #     case FileType.DIR:
+                        #         action.action_type = ActionType.MKDIR
                     else:
                         action.action_type = ActionType.UNKNOWN
 
 
-def results_for_mirror(results: Iterable[SyncAction]) -> None:
+def results_for_mirror(results: SynchingManager) -> None:
     for action in results:
         src = action.a
         dest = action.b
@@ -878,11 +935,12 @@ def results_for_mirror(results: Iterable[SyncAction]) -> None:
                 if (not src.exists):
                     action.action_type = ActionType.DELETE
                 else:
-                    match src.type:
-                        case FileType.REGULAR:
-                            action.action_type = ActionType.UPDATE
-                        case FileType.DIR:
-                            action.action_type = ActionType.MKDIR
+                    action.action_type = ActionType.UPDATE
+                    # match src.type:
+                    #     case FileType.REGULAR:
+                    #
+                    #     case FileType.DIR:
+                    #         action.action_type = ActionType.MKDIR
 
 def _parse_rclone_progress(actions:List[SyncAction], sync_direction: ActionDirection, output:Dict) -> SyncProgress:
     '''

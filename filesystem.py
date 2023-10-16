@@ -433,7 +433,7 @@ class FileSystemObject:
         :param exists: TRUE if the object truly exists, FALSE otherwise (you can have a local file that doesn't exist remotely)
         :param hidden: TRUE if it's a hidden file (according to the definition of the hosting OS), FALSE otherwise.
         """
-        this.fullpath = fullpath
+        this._fullpath = fullpath
         this.type = type
         this._size = size
         this._mtime = mtime
@@ -444,12 +444,12 @@ class FileSystemObject:
     @property
     def absolute_path(this) -> str:
         """Gets the absolute path of the fs object"""
-        return this.fullpath.absolute_path
+        return this._fullpath.absolute_path
 
     @property
     def relative_path(this) -> str:
         """Gets the relative path of the fs object"""
-        return this.fullpath.relative_path
+        return this._fullpath.relative_path
 
     @property
     def containing_directory(this) -> str:

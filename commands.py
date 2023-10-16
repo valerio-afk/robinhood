@@ -47,7 +47,7 @@ class SupendCommand(RunCommand):
         if platform.startswith("linux"):
             cmd = "systemctl suspend"
         elif platform.startswith("win"):
-            cmd = "shutdown /d /t 0"
+            cmd = "rundll32.exe powrprof.dll,SetSuspendState 0,1,0"
         elif platform.startswith("darwin"):
             cmd = "pmset sleepnow"
         else:

@@ -35,6 +35,7 @@ from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
+from backend import AbstractSyncAction, SynchingManager
 from backend import find_dedupe
 from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
@@ -193,12 +194,12 @@ class FileDetailsSummary(Widget):
     destination_file:FileSystemObject = None
 
 
-    @property
-    def has_pending_actions(this):
-        for _ in this.pending_actions:
-            return True
-
-        return False
+    # @property
+    # def has_pending_actions(this):
+    #     for _ in this.pending_actions:
+    #         return True
+    #
+    #     return False
 
     def show(this, src_file:Union[FileSystemObject|None], dest_file:Union[FileSystemObject|None]):
         this.source_file = src_file
@@ -233,7 +234,7 @@ class FileDetailsSummary(Widget):
         if (this.source_file is None) and (this.destination_file is None):
             return None
 
-        fullpath = this.destination_file.fullpath if this.source_file is None else this.source_file.fullpath
+        fullpath = this.destination_file._fullpath if this.source_file is None else this.source_file._fullpath
 
         _, filename = os.path.split(fullpath.absolute_path)
 
@@ -257,11 +258,10 @@ class FileDetailsSummary(Widget):
         key_style = this.get_component_rich_style("cs--key")
         description_style = this.get_component_rich_style("cs--description")
 
-        def _show_formatted_size(x:Union[FileSystemObject|None]):
-            return sizeof_fmt(x) if x is not None else "-"
+        show_formatted_size = lambda x : sizeof_fmt(x) if x is not None else "-"
 
-        local_size = _show_formatted_size(this.source_size)
-        dest_size  = _show_formatted_size(this.destination_size)
+        local_size = show_formatted_size(this.source_size)
+        dest_size  = show_formatted_size(this.destination_size)
 
 
         text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename,key_style)))
@@ -302,7 +302,7 @@ class RobinHoodRemoteList(Static):
     def __init__(this,*args,**kwargs):
         super().__init__(*args,**kwargs)
 
-        this.remotes:List[Tuple[str,str]] = get_rclone_remotes()
+        this.remotes:List[Tuple[str,...]] = get_rclone_remotes()
         this.border_title="Remotes"
 
     def compose(this) -> ComposeResult:
@@ -320,22 +320,23 @@ class RobinHoodRemoteList(Static):
 
 
 class RobinHoodExcludePath(Static):
-    def __init__(this,*args,**kwargs):
+    def __init__(this,profile:RobinHoodProfile,*args,**kwargs):
         super().__init__(*args,**kwargs)
         this.border_title="Path to Exclude"
+        this._profile = profile
 
 
     @property
     def paths(this) -> Iterable[str]:
-        return this.app.profile.exclusion_filters
+        return this._profile.exclusion_filters
 
     @property
-    def exclude_hidden(this) -> Iterable[str]:
-        return this.app.profile.exclude_hidden_files
+    def exclude_hidden(this) -> bool:
+        return this._profile.exclude_hidden_files
 
     @property
-    def deep_comparisons(this) -> Iterable[str]:
-        return this.app.profile.deep_comparisons
+    def deep_comparisons(this) -> bool:
+        return this._profile.deep_comparisons
 
     def compose(this) -> ComposeResult:
         yield TextArea()
@@ -361,9 +362,9 @@ class RobinHoodExcludePath(Static):
         textarea = this.query_one(TextArea)
         new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
 
-        this.app.profile.exclusion_filters = new_filters
-        this.app.profile.exclude_hidden_files =this.query_one("#exclude_hidden").value
-        this.app.profile.deep_comparisons = this.query_one("#deep_comparisons").value
+        this._profile.exclusion_filters = new_filters
+        this._profile.exclude_hidden_files =this.query_one("#exclude_hidden").value
+        this._profile.deep_comparisons = this.query_one("#deep_comparisons").value
 
 
 class PromptProfileNameModalScreen(ModalScreen):
@@ -420,11 +421,11 @@ class RobinHood(App):
         super().__init__(*args, **kwargs)
         this.profile = profile if profile is not None else RobinHoodConfiguration().current_profile
         this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
-        this._tree_pane:FileTreeTable = FileTreeTable(id="tree_pane")
+        this._tree_pane:DirectoryComparisonDataTable = DirectoryComparisonDataTable(id="tree_pane")
         this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
         this._details_pane:FileDetailsSummary = FileDetailsSummary(id="file_details")
         this._progress_bar:ProgressBar = ProgressBar(show_eta=False,id="synch_progbar")
-        this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(id="filter_list")
+        this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(profile=profile, id="filter_list")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
 
     def post_display_hook(this) -> None:
@@ -647,16 +648,7 @@ class RobinHood(App):
 
     @work(exclusive=True,name="synching",thread=True)
     def _run_synch(this) -> None:
-
-        # Makes source/destination Paths to help the bulk operation manager in apply_changes
-        source = AbstractPath.make_path(this.src)
-        destination = AbstractPath.make_path(this.dst) if this.syncmode != SyncMode.DEDUPE else None
-
-        apply_changes(this._tree_pane.results,
-                      local=source,
-                      remote=destination,
-                      eventhandler=this._backend
-        )
+        apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
 
 
@@ -669,7 +661,7 @@ class RobinHood(App):
 
 
 
-    def show_results(this,results:Union[Iterable[SyncAction]|None]) -> None:
+    def show_results(this,results:Union[SynchingManager|None]) -> None:
         this._tree_pane.show_results(results)
         this._summary_pane.results = results
         this._update_job_related_interface()
@@ -836,7 +828,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
         cmd()
 
 
-class FileTreeTable(DataTable):
+class DirectoryComparisonDataTable(DataTable):
 
     def __init__(this,*args,**kwargs):
         kwargs["cursor_type"]="row"
@@ -847,7 +839,7 @@ class FileTreeTable(DataTable):
         this.add_column(Text.from_markup("Action",overflow="ellipsis"),key="action",width=7)
         this.add_column(Text.from_markup("Destination Directories",overflow="ellipsis"),key="dst",width=45)
 
-        this._results = None
+        this._sync_manager = None
 
     def adjust_column_sizes(this) -> None:
         psize = this.size.width-6
@@ -885,56 +877,51 @@ class FileTreeTable(DataTable):
                 i+=1
                 delta-=1
 
-
-
-
         this.refresh()
 
 
-    def __getitem__(this, index:int):
-        if this.results is None:
-            raise IndexError()
-
-        res = this.results
-        if (not isinstance(res,list)):
-            res = [x for x in res]
-
-        return res[index]
+    def __getitem__(this, index:int) -> AbstractSyncAction:
+        return this.changes[index]
+        # if this.changes is None:
+        #     raise IndexError()
+        #
+        # res = this.changes
+        # if (not isinstance(res,list)):
+        #     res = [x for x in res]
+        #
+        # return res[index]
 
     @property
-    def results (this) -> Union[Iterable[SyncAction]|None]:
-        return this._results
+    def changes (this) -> Union[SynchingManager | None]:
+        return this._sync_manager
 
-    def show_results(this,results:List[SyncAction]) -> None:
+    def show_results(this,changes:SynchingManager) -> None:
         this.clear(columns=False)
 
-        this._results = results
-
-        if (results is None):
+        if (changes is None):
             return None
 
+        this._sync_manager = changes
 
-        this._results = sorted(this._results,key=lambda x : str(x.action_type))
+        this._sync_manager.sort(key=lambda x : (len(AbstractPath.split(x.a.absolute_path)), x.a.absolute_path))
 
-        rendered_rows = [None] * len(this._results)
+        rendered_rows = [None] * len(this._sync_manager)
 
-        for i,x in enumerate(this._results):
+        for i,x in enumerate(this._sync_manager):
             rendered_rows[i] = this._render_row(x)
 
         this.add_rows(rendered_rows)
-        #this.add_row(*rendered_row,key=str(i))
-
 
         this.focus()
 
     def update_action(this, action:SyncAction):
-        if (this._results is None): return
+        if (this._sync_manager is None): return
 
         # The _result property can be any iterable
         # As I like the .index method, I convert it into a list if necessary
-        results = this._results
+        results = this._sync_manager
 
-        if (not isinstance(this._results,list)):
+        if (not isinstance(this._sync_manager, list)):
             results = [x for x in results]
 
         try:
@@ -946,31 +933,30 @@ class FileTreeTable(DataTable):
         except ValueError:
             ...
 
-
     def on_key(this,event:events.Key):
 
-        if this._results is None:
+        if this.changes is None:
             return
 
-        action = this._results[this.cursor_row]
+        action = this.changes[this.cursor_row]
 
         if (action is not None):
             match event.name:
                 case "space":
                     action.action_type = ActionType.NOTHING
-                    this.update_action(action)
+                    #this.update_action(action)
                 case "right":
                     if action.action_type == ActionType.NOTHING:
                         if (action.a is not None) and action.a.exists:
                             action.direction = ActionDirection.SRC2DST
-                            if action.a.type == FileType.DIR:
-                                action.action_type = ActionType.MKDIR
-                            else:
-                                action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
+                            # if action.a.type == FileType.DIR:
+                            #     action.action_type = ActionType.MKDIR
+                            # else:
+                            action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
                     elif action.direction != ActionDirection.SRC2DST:
                         if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.a.exists) or \
-                           ((action.action_type == ActionType.DELETE) and (action.b.exists)) or \
-                           (action.action_type == ActionType.MKDIR):
+                           ((action.action_type == ActionType.DELETE) and (action.b.exists)): #or \
+                           #(action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.SRC2DST
                         else:
                             action.action_type = ActionType.NOTHING
@@ -978,14 +964,14 @@ class FileTreeTable(DataTable):
                     if action.action_type == ActionType.NOTHING:
                         if (action.b is not None) and action.b.exists:
                             action.direction = ActionDirection.DST2SRC
-                            if action.b.type == FileType.DIR:
-                                action.action_type = ActionType.MKDIR
-                            else:
-                                action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
+                            # if action.b.type == FileType.DIR:
+                            #     action.action_type = ActionType.MKDIR
+                            # else:
+                            action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
                     elif action.direction != ActionDirection.DST2SRC:
                         if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.b.exists) or \
-                           ((action.action_type == ActionType.DELETE) and action.a.exists) or \
-                           (action.action_type == ActionType.MKDIR):
+                           ((action.action_type == ActionType.DELETE) and action.a.exists): #or \
+                           #(action.action_type == ActionType.MKDIR):
                             action.direction = ActionDirection.DST2SRC
                         else:
                             action.action_type = ActionType.NOTHING
@@ -1013,7 +999,8 @@ class FileTreeTable(DataTable):
 
     def _render_row(this,x:SyncAction):
         match x.action_type:
-            case ActionType.MKDIR | ActionType.COPY:
+            #case ActionType.MKDIR | ActionType.COPY:
+            case ActionType.COPY:
                 dir_frm = frm_src = frm_dest = "[green]"
             case ActionType.UPDATE:
                 dir_frm = frm_src = frm_dest = "[bright_green]"
