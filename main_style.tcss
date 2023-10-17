@@ -124,17 +124,35 @@ HeaderIcon{
     color: $warning
 }
 
-RobinHoodExcludePath #other_settings
+RobinHoodExcludePath #other_settings, DisplayFilters #display_filters
 {
 
     height: 5;
     padding:1;
+    align: center middle;
 }
 
-RobinHoodExcludePath #other_settings Label
+RobinHoodExcludePath #other_settings Label, DisplayFilters #display_filters Label
 {
     content-align: left middle;
     width: auto;
     height: 3;
     padding-left:3;
+}
+
+DisplayFilters
+{
+    dock:bottom;
+    height: 5;
+    background: $primary-background-darken-2;
+}
+
+.displayed
+{
+    display: block;
+}
+
+.hidden
+{
+    display: none;
 }

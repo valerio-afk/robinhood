@@ -102,7 +102,7 @@ class ComparisonSummary(Widget):
     def pending_actions(this):
         if this.results is not None:
             for r in this._results:
-                if (r.status != SyncStatus.SUCCESS) and (r.action_type != ActionType.NOTHING):
+                if (r.status != SyncStatus.SUCCESS) and (r.type != ActionType.NOTHING):
                     yield r
 
 
@@ -131,7 +131,7 @@ class ComparisonSummary(Widget):
 
         #if (this.results is not None):
         for r in this.pending_actions:
-            action = r.action_type
+            action = r.type
 
             if (action == ActionType.COPY) or (action == ActionType.UPDATE):
                 match r.direction:
@@ -234,7 +234,7 @@ class FileDetailsSummary(Widget):
         if (this.source_file is None) and (this.destination_file is None):
             return None
 
-        fullpath = this.destination_file._fullpath if this.source_file is None else this.source_file._fullpath
+        fullpath = this.destination_file.fullpath if this.source_file is None else this.source_file.fullpath
 
         _, filename = os.path.split(fullpath.absolute_path)
 
@@ -427,7 +427,9 @@ class RobinHood(App):
         this._progress_bar:ProgressBar = ProgressBar(show_eta=False,id="synch_progbar")
         this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(profile=profile, id="filter_list")
         this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
+        this._display_filters:DisplayFilters = DisplayFilters(this._tree_pane,classes="hidden")
 
+    #TODO: this seems computationally intensive. Can we find another hook/event?
     def post_display_hook(this) -> None:
         this._tree_pane.adjust_column_sizes()
 
@@ -438,7 +440,6 @@ class RobinHood(App):
         lbl.overflow=("ellipsis")
 
         this.query_one("#status_text").update(lbl)
-
 
     @on(Select.Changed, "#syncmethod")
     def syncmethod_changed(this, event:Select.Changed) -> None:
@@ -535,6 +536,9 @@ class RobinHood(App):
     def _update_job_related_interface(this) -> None:
         button = this.query_one("#work_launcher")
         enablable = this.query("#topbar Input, #topbar Select")
+
+        this._display_filters.set_class(this._tree_pane.is_empty,"hidden")
+        this._display_filters.set_class(not this._tree_pane.is_empty, "displayed")
 
         if not this.is_working:
             if (this._summary_pane.has_pending_actions):
@@ -693,6 +697,7 @@ class RobinHood(App):
             ),
             this._details_pane,
             this._tree_pane,
+            this._display_filters,
             id="main_pane",
             classes="overlayable"
         )
@@ -791,11 +796,9 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     # Update the status bar if it's either started or in progress
                     if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
                         # Gets a precise label wrt the current action
-                        match action.action_type:
+                        match action.type:
                             case ActionType.DELETE:
                                 desc_action = "Deleting"
-                            case ActionType.MKDIR:
-                                desc_action = "Creating directory"
                             case ActionType.UPDATE | ActionType.COPY:
                                 desc_action = "Copying"
                             case _:
@@ -830,6 +833,13 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
 class DirectoryComparisonDataTable(DataTable):
 
+    BINDINGS = [
+        Binding("space", "cancel_action", "Cancel Action", show=False),
+        Binding("left", "change_direction('left')", "Change Action Direction", show=False),
+        Binding("right", "change_direction('right')", "Change Action Direction", show=False),
+        Binding("delete", "delete_file", "Delete File", show=False)
+    ]
+
     def __init__(this,*args,**kwargs):
         kwargs["cursor_type"]="row"
 
@@ -839,32 +849,57 @@ class DirectoryComparisonDataTable(DataTable):
         this.add_column(Text.from_markup("Action",overflow="ellipsis"),key="action",width=7)
         this.add_column(Text.from_markup("Destination Directories",overflow="ellipsis"),key="dst",width=45)
 
-        this._sync_manager = None
+        this._sync_manager:[SynchingManager|None] = None
+        this._displayed_actions:List[SyncAction] = []
+
+        this._show_no_action = True
+        this._show_copy_update = True
+        this._show_delete = True
+
 
     def adjust_column_sizes(this) -> None:
+        """
+        Adapts the size of the column intepreting the width parameter in terms of percentage
+        """
+
+        # the overall available space is given by the sie of the widget -6 (not sure where this comes from, but it works)
         psize = this.size.width-6
 
+        # in the case the height of the table is larger than the hight of the visible area, it means the scroll bar is
+        # visible, eating more horizontal space
         if this.virtual_size.height > this.size.height:
             psize-=2 #thickness of the scrollbar
 
+
+        #total size of all columns
         tot_size=0
 
+        # colums in the table
         columns = list(this.columns.values())
 
-
-        #if all([c for c in size]):
-
+        # For each column
         for c in columns:
+            # Let's disable the auto_width (not necessary)
             c.auto_width = False
+
+            # I need to store somewhere the width expressed in percentage, because I need te width property
+            # to set the new calculated size
             if (not hasattr(c, "percentage_width") or (c.percentage_width is None)):
                 c.percentage_width = c.width
 
+            # calculate the actual size from the percentage
             c.width = int( psize * (c.percentage_width / 100))
+
+            # update the total size
             tot_size += c.width
 
+        # due to roudning issues, the total size can be different than the actual width
+        # ie tot size can be less or greater than the actual width
         if tot_size != psize:
+            # if so, the difference in sizes is redistributed to all columns
             delta = psize - tot_size
 
+            # making bigger or smaller?
             unit = 1 if delta>0 else -1
 
             if (delta<0):
@@ -872,31 +907,75 @@ class DirectoryComparisonDataTable(DataTable):
 
             i = 0
 
+            # each column size is increased/decreased by 1 at each iteration until there's anything else to
+            # ridestribute.
             while delta>0:
                 columns[i%len(columns)].width += unit
                 i+=1
                 delta-=1
 
+        this.show_horizontal_scrollbar = False
+
+        # refresh the widget
         this.refresh()
+
+
+    @property
+    def show_no_action(this) -> bool:
+        return this._show_no_action
+
+    @show_no_action.setter
+    def show_no_action(this, value:bool) -> None:
+        refresh = this._show_no_action != value
+
+        this._show_no_action = value
+
+        if refresh:
+            this.refresh_table()
+
+    @property
+    def show_copy_update(this) -> bool:
+        return this._show_copy_update
+
+    @show_copy_update.setter
+    def show_copy_update(this, value:bool) -> None:
+        refresh = this._show_copy_update != value
+
+        this._show_copy_update = value
+
+        if refresh:
+            this.refresh_table()
+    @property
+    def show_delete(this) -> bool:
+        return this._show_delete
+
+    @show_delete.setter
+    def show_delete(this, value:bool) -> None:
+        refresh = this._show_delete != value
+
+        this._show_delete = value
+
+        if refresh:
+            this.refresh_table()
+
+    @property
+    def is_empty(this) -> bool:
+        return (this.changes is None) or (len(this.changes) == 0)
 
 
     def __getitem__(this, index:int) -> AbstractSyncAction:
         return this.changes[index]
-        # if this.changes is None:
-        #     raise IndexError()
-        #
-        # res = this.changes
-        # if (not isinstance(res,list)):
-        #     res = [x for x in res]
-        #
-        # return res[index]
 
     @property
     def changes (this) -> Union[SynchingManager | None]:
+        """
+        Returns the changes to be applied to the source/destination folders
+
+        :return: The SynchingManager containing the list of changes. It can also return None if the table isn't displaying anything
+        """
         return this._sync_manager
 
     def show_results(this,changes:SynchingManager) -> None:
-        this.clear(columns=False)
 
         if (changes is None):
             return None
@@ -905,100 +984,159 @@ class DirectoryComparisonDataTable(DataTable):
 
         this._sync_manager.sort(key=lambda x : (len(AbstractPath.split(x.a.absolute_path)), x.a.absolute_path))
 
-        rendered_rows = [None] * len(this._sync_manager)
+        this.refresh_table()
 
-        for i,x in enumerate(this._sync_manager):
+        this.focus()
+
+    def refresh_table(this):
+        this.clear(columns=False)
+
+        if (this._sync_manager  is None):
+            return None
+
+        this._displayed_actions = []
+
+        for itm in this._sync_manager:
+            if (this.show_no_action and (itm.type == ActionType.NOTHING)) or \
+               (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or \
+               (this.show_delete and (itm.type == ActionType.DELETE)):
+                this._displayed_actions.append(itm)
+
+        rendered_rows = [None] * len(this._displayed_actions)
+
+        for i,x in enumerate(this._displayed_actions):
             rendered_rows[i] = this._render_row(x)
 
         this.add_rows(rendered_rows)
 
-        this.focus()
 
-    def update_action(this, action:SyncAction):
-        if (this._sync_manager is None): return
 
-        # The _result property can be any iterable
-        # As I like the .index method, I convert it into a list if necessary
-        results = this._sync_manager
+    def update_action(this, action:SyncAction) -> None:
+        """
+        Re-render a specific action in the table
 
-        if (not isinstance(this._sync_manager, list)):
-            results = [x for x in results]
+        :param action: the action to be updated in the table
+        """
 
-        try:
-            i = results.index(action)
-            columns = this._render_row(action)
-
-            for j in range(len(this.columns)):
-                this.update_cell_at(Coordinate(i,j),columns[j],update_width=False)
-        except ValueError:
-            ...
-
-    def on_key(this,event:events.Key):
-
-        if this.changes is None:
+        if (this._sync_manager is None):
             return
 
-        action = this.changes[this.cursor_row]
+        try:
+            # Finds the index of the given action
+            i = this._displayed_actions.index(action)
 
-        if (action is not None):
-            match event.name:
-                case "space":
-                    action.action_type = ActionType.NOTHING
-                    #this.update_action(action)
-                case "right":
-                    if action.action_type == ActionType.NOTHING:
-                        if (action.a is not None) and action.a.exists:
-                            action.direction = ActionDirection.SRC2DST
-                            # if action.a.type == FileType.DIR:
-                            #     action.action_type = ActionType.MKDIR
-                            # else:
-                            action.action_type = ActionType.UPDATE if action.b.exists else ActionType.COPY
-                    elif action.direction != ActionDirection.SRC2DST:
-                        if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.a.exists) or \
-                           ((action.action_type == ActionType.DELETE) and (action.b.exists)): #or \
-                           #(action.action_type == ActionType.MKDIR):
-                            action.direction = ActionDirection.SRC2DST
-                        else:
-                            action.action_type = ActionType.NOTHING
-                case "left":
-                    if action.action_type == ActionType.NOTHING:
-                        if (action.b is not None) and action.b.exists:
-                            action.direction = ActionDirection.DST2SRC
-                            # if action.b.type == FileType.DIR:
-                            #     action.action_type = ActionType.MKDIR
-                            # else:
-                            action.action_type = ActionType.UPDATE if action.a.exists else ActionType.COPY
-                    elif action.direction != ActionDirection.DST2SRC:
-                        if (((action.action_type == ActionType.UPDATE) or (action.action_type == action.action_type.COPY)) and action.b.exists) or \
-                           ((action.action_type == ActionType.DELETE) and action.a.exists): #or \
-                           #(action.action_type == ActionType.MKDIR):
-                            action.direction = ActionDirection.DST2SRC
-                        else:
-                            action.action_type = ActionType.NOTHING
-                case "delete":
-                    action.action_type = ActionType.DELETE
+            # The action is re-rendered
+            columns = this._render_row(action)
 
-                    if action.direction is None:
-                        action.direction = ActionDirection.SRC2DST
+            # Colums of the i-th row are updated
+            for j in range(len(this.columns)):
+                this.update_cell_at(Coordinate(i,j),columns[j],update_width=False)
 
-                    match action.direction:
-                        case ActionDirection.SRC2DST:
-                            if not action.b.exists:
-                                action.direction = ActionDirection.DST2SRC
+            this.refresh_row(i)
 
-                        case ActionDirection.DST2SRC:
-                            if not action.a.exists:
-                                action.direction = ActionDirection.SRC2DST
+        except ValueError: # This exception is raised when the .index_of method fails
+            ...
 
 
+    def action_cancel_action(this):
+        if (this.changes is None) or (len(this._displayed_actions)==0):
+            return
 
-            this.update_action(action)
-            this.app.query_one("#summary").refresh()
-            this.app._update_job_related_interface()
+        # get the action highlighted by the cursor - ie the one the user wants to change
+        action = this._displayed_actions[this.cursor_row]
 
+        # do we really need this guard clause?
+        if (action is None):
+            return
+
+        action.type = ActionType.NOTHING
+
+        this.update_action(action)
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
+
+    def action_change_direction(this, key):
+        if (this.changes is None) or (len(this._displayed_actions) == 0):
+            return
+
+        # get the action highlighted by the cursor - ie the one the user wants to change
+        action = this._displayed_actions[this.cursor_row]
+
+        # do we really need this guard clause?
+        if (action is None):
+            return
+
+        if key == "right":
+            new_direction = ActionDirection.SRC2DST
+            src = action.a
+            dst = action.b
+        elif key == "left":
+            # in case of the left key, source and destination are swapped and DST2SRC is the new direction
+            # to apply
+            new_direction = ActionDirection.DST2SRC
+            src = action.b
+            dst = action.a
+
+        # we can distinguish to case: either the current action is nothing and we want to impose a sync action
+        # or it's not nothing and we want to swap the direction of syching
+
+        # Let's deal with the first case
+        if action.type == ActionType.NOTHING:
+            # If I want to transfer a file from source to destiantion, it must exist in source
+            if (src is not None) and src.exists:
+                # if so, all suitable changes are applied
+                action.direction = new_direction
+                action.type = ActionType.UPDATE if action.b.exists else ActionType.COPY
+        elif action.direction != new_direction:
+            # this is the case where we want to swap the action direction
+
+            # in case the action is copy/update, as before, we need to make sure if the file in source exists.
+            # However, in case of deletion, we need to make sure the file exist in destination (otherwise we
+            # cannot delete anything)
+
+            # if everything matches the direction is changed
+            if (((action.type == ActionType.UPDATE) or (action.type == action.type.COPY)) and src.exists) or \
+                    ((action.type == ActionType.DELETE) and dst.exists):
+                action.direction = new_direction
+            else:
+                # otherwise, it set to Nothing
+                action.type = ActionType.NOTHING
+
+        this.update_action(action)
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
+
+    def action_delete_file(this):
+        if (this.changes is None) or (len(this._displayed_actions) == 0):
+            return
+
+        # get the action highlighted by the cursor - ie the one the user wants to change
+        action = this._displayed_actions[this.cursor_row]
+
+        # do we really need this guard clause?
+        if (action is None):
+            return
+
+        action.type = ActionType.DELETE
+
+        if action.direction is None:
+            action.direction = ActionDirection.SRC2DST
+
+        match action.direction:
+            case ActionDirection.SRC2DST:
+                if not action.b.exists:
+                    action.direction = ActionDirection.DST2SRC
+
+            case ActionDirection.DST2SRC:
+                if not action.a.exists:
+                    action.direction = ActionDirection.SRC2DST
+
+        this.update_action(action)
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
 
     def _render_row(this,x:SyncAction):
-        match x.action_type:
+        match x.type:
             #case ActionType.MKDIR | ActionType.COPY:
             case ActionType.COPY:
                 dir_frm = frm_src = frm_dest = "[green]"
@@ -1014,13 +1152,16 @@ class DirectoryComparisonDataTable(DataTable):
             case _:
                 dir_frm = frm_src = frm_dest = "[grey]"
 
-        match x.action_type:
+        match x.type:
             case ActionType.NOTHING: direction = "-"
             case ActionType.UNKNOWN: direction = "?"
             case _: direction = x.direction.value
 
         src = ""
         dst = ""
+
+        # src_details = ""
+        # dst_details = ""
 
         icon_src = ""
         icon_dst = ""
@@ -1031,18 +1172,30 @@ class DirectoryComparisonDataTable(DataTable):
             else:
                 return ":white_medium_star:[i]"
 
+        # def _make_suitable_details(x:FileSystemObject):
+        #     spacing = " " * 3
+        #     if x.exists:
+        #         fname = x.filename
+        #         size = sizeof_fmt(x.size) if x.size is not None else "-"
+        #         hash = x.checksum if x.has_checksum else "-"
+        #
+        #         return f"[b]Name:[/b] {fname}{spacing}[b]Size:[/b] {size}{spacing}[b]Hash:[/b] {hash}"
+        #     else:
+        #         return "File not existing here"
+
         #if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
         if x.a is not None:
             icon_src = _make_suitable_icon(x.a)
             src = x.a.relative_path
+            # src_details = _make_suitable_details(x.a)
 
         #if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
         if x.b is not None:
             icon_dst = _make_suitable_icon(x.b)
             dst = x.b.relative_path
+            # dst_details = _make_suitable_details(x.b)
 
-
-
+        #TODO: implement deletion both ways
         if x.direction == ActionDirection.DST2SRC:
             frm_src, frm_dest = frm_dest, frm_src
 
@@ -1074,3 +1227,35 @@ class DirectoryComparisonDataTable(DataTable):
             central_column,
             dst_column
         )
+
+
+class DisplayFilters(Widget):
+
+    def __init__(this, data_table: DirectoryComparisonDataTable,*args,**kwargs):
+        super().__init__(*args, **kwargs)
+
+        this._data_table = data_table
+
+        this._sub_widgets = {
+            "No action": Switch(id="df_no_action",value=True),
+            "Copy": Switch(id="df_copy",value=True),
+            "Delete": Switch(id="df_delete",value=True)
+        }
+
+    def compose(this) -> ComposeResult:
+        widgets = []
+
+        for lbl,switch in this._sub_widgets.items():
+            widgets.append(Label(lbl))
+            widgets.append(switch)
+
+        yield Horizontal(*widgets, id="display_filters")
+
+    @on(Switch.Changed)
+    def on_changed(this, event:Switch.Changed) -> None:
+        if event.switch == this._sub_widgets["No action"]:
+            this._data_table.show_no_action = event.value
+        elif event.switch == this._sub_widgets["Copy"]:
+            this._data_table.show_copy_update = event.value
+        elif event.switch == this._sub_widgets["Delete"]:
+            this._data_table.show_delete = event.value

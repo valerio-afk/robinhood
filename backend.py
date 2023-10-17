@@ -246,14 +246,14 @@ class SyncAction(AbstractSyncAction):
                  ):
 
         super().__init__(a=a,b=b,direction=direction)
-        this.action_type = action_type
+        this.type = action_type
         this._update = None
         this._timeout = timeout
 
 
 
     def __action_type_str(this) -> str:
-        match (this.action_type):
+        match (this.type):
             case ActionType.NOTHING:
                 return '-'
             # case ActionType.MKDIR:
@@ -268,7 +268,7 @@ class SyncAction(AbstractSyncAction):
     def __str__(this) -> str:
         action_type = this.__action_type_str()
 
-        if (this.action_type != ActionType.NOTHING):
+        if (this.type != ActionType.NOTHING):
             action_type = str(this.direction) + action_type
 
         return f"{this.a} {action_type} {this.b}"
@@ -287,7 +287,7 @@ class SyncAction(AbstractSyncAction):
             update = _parse_rclone_progress([this],this.direction,d)
             _trigger("on_synching", SyncEvent(update))
 
-        match this.action_type:
+        match this.type:
             # case ActionType.MKDIR:
             #     mkdir(this.get_one_path)
             case ActionType.DELETE:
@@ -313,7 +313,7 @@ class SyncAction(AbstractSyncAction):
 
     def _check_success(this) -> None:
 
-        if this.action_type == ActionType.NOTHING:
+        if this.type == ActionType.NOTHING:
             success = True
         else:
             x = this.a
@@ -325,7 +325,7 @@ class SyncAction(AbstractSyncAction):
             if (this.direction == ActionDirection.DST2SRC):
                 x, y = y, x
 
-            match this.action_type:
+            match this.type:
                 # case ActionType.MKDIR:
                 #     success = y.exists
                 case ActionType.UPDATE | ActionType.COPY:
@@ -368,6 +368,15 @@ class SynchingManager():
     def __getitem__(this, item:int) -> AbstractSyncAction:
         return this._changes[item]
 
+    def index_of(this, action:AbstractSyncAction) -> int:
+        """
+        Returns the position of the provided action within the manager
+
+        :param action: the action to retrieve its position
+        """
+
+        return this._changes.index(action)
+
     def clear(this) -> None:
         this._changes = []
 
@@ -391,11 +400,46 @@ class SynchingManager():
     def sort(this,**kwargs) -> None:
         this._changes.sort(**kwargs)
 
-
     def apply_changes(this, show_progress:bool=False, eventhandler: [SyncEvent | None] = None) -> None:
         for x in this._changes:
-            #TODO: add changes to the cache of the file systems - I have done all this mess for this reason
-            x.apply_action(show_progress, eventhandler)
+            if x.status != SyncStatus.SUCCESS:
+                x.apply_action(show_progress, eventhandler)
+                this.flush_action(x)
+
+        this._flush_cache()
+
+
+    def _flush_cache(this) -> None:
+        """
+        Flushes the file system cache into the disk (JSON file) after changes have been applied
+        """
+        this.source.flush_file_object_cache()
+        this.destination.flush_file_object_cache()
+
+    def flush_action(this, action: SyncAction) -> None:
+        """
+        Flush action changes (if successful) within the directory trees.
+        For example, if an action creates a file in the destination, it needs to be updated with such information
+
+        :param action: Action to flush in the file system cache
+        """
+
+        if action.status != SyncStatus.SUCCESS:
+            return
+
+        match action.type:
+            case ActionType.COPY | ActionType.UPDATE:
+                side = this.destination if action.direction == ActionDirection.SRC2DST else this.source
+                fso = action.b if action.direction == ActionDirection.SRC2DST else action.a
+
+                side.set_file(fso.fullpath, fso)
+            case ActionType.DELETE:
+                side = this.destination if action.direction == ActionDirection.SRC2DST else this.source
+                fso = action.b if action.direction == ActionDirection.SRC2DST else action.a
+
+                side.set_file(fso.fullpath, None)
+
+
 
 class BulkCopySynchingManager(SynchingManager):
 
@@ -411,7 +455,7 @@ class BulkCopySynchingManager(SynchingManager):
 
     def add_action(this, action: SyncAction) -> None:
 
-        if action.action_type not in [ActionType.COPY, ActionType.UPDATE]:
+        if action.type not in [ActionType.COPY, ActionType.UPDATE]:
             raise ValueError("The provided action is not copying or updating a file")
 
         if (action.direction != this._direction):
@@ -459,6 +503,9 @@ class BulkCopySynchingManager(SynchingManager):
                     # Notify that this action is concluded
                     _trigger("on_synching",SyncEvent(x))
 
+                    #Flush changes into file system
+                    this.flush_action(x)
+
             # Filter out all the terminated actions
             this._actions_in_progress = [x for x in this._actions_in_progress if x.status == SyncStatus.IN_PROGRESS]
 
@@ -491,11 +538,14 @@ class BulkCopySynchingManager(SynchingManager):
              listener=_update_internal_status,
              args=['--files-from', path,'--no-check-dest', '--no-traverse'])
 
-        # Better double checking again when it's done if everything has been copied successfully
+        # Better double-checking again when it's done if everything has been copied successfully
         for itm in this:
             if itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]:
                 itm._check_success()
                 _trigger("on_synching", SyncEvent(itm))
+                this.flush_action(itm)
+
+        this._flush_cache()
 
 class RobinHoodBackend(ABC):
     '''This class manages the communication between the backend and frontend
@@ -846,7 +896,8 @@ def apply_changes(changes: SynchingManager,
 
         # Check each action if it could be put inside one of the two copy bulks
         for itm in changes:
-            if itm.action_type != ActionType.NOTHING:
+            if (itm.type != ActionType.NOTHING) and (itm.status != SyncStatus.SUCCESS):
+
                 # Check the action direction
                 match itm.direction:
                     case ActionDirection.SRC2DST:
@@ -903,16 +954,16 @@ def results_for_update(results: SynchingManager) -> None:
         dest = action.b
 
         if action.direction == ActionDirection.DST2SRC:
-            action.action_type = ActionType.NOTHING
+            action.type = ActionType.NOTHING
             action.direction = None
         elif (src is not None) and (dest is not None):
-            if (action.action_type == ActionType.NOTHING):
+            if (action.type == ActionType.NOTHING):
                 if (src.size != dest.size):
                     src_mtime = src.mtime
                     dest_mtime = dest.mtime
                     if src_mtime.timestamp() > dest_mtime.timestamp():
                         action.direction = ActionDirection.SRC2DST
-                        action.action_type = ActionType.UPDATE
+                        action.type = ActionType.UPDATE
                         #
                         # match src.type:
                         #     case FileType.REGULAR:
@@ -920,7 +971,7 @@ def results_for_update(results: SynchingManager) -> None:
                         #     case FileType.DIR:
                         #         action.action_type = ActionType.MKDIR
                     else:
-                        action.action_type = ActionType.UNKNOWN
+                        action.type = ActionType.UNKNOWN
 
 
 def results_for_mirror(results: SynchingManager) -> None:
@@ -933,9 +984,9 @@ def results_for_mirror(results: SynchingManager) -> None:
                 action.direction = ActionDirection.SRC2DST
 
                 if (not src.exists):
-                    action.action_type = ActionType.DELETE
+                    action.type = ActionType.DELETE
                 else:
-                    action.action_type = ActionType.UPDATE
+                    action.type = ActionType.UPDATE
                     # match src.type:
                     #     case FileType.REGULAR:
                     #

@@ -13,13 +13,20 @@ class ActionType(Enum):
     DELETE:int=4
     UNKNOWN:int=5
 
+    @property
+    def supports_both(this):
+        return this == ActionType.DELETE
+
 
 class ActionDirection(Enum):
     SRC2DST:str = '>'
     DST2SRC:str = '<'
+    BOTH:str = '<>'
 
     def __str__(this) ->str:
         return this.value
+
+
 
 
 class SyncStatus(Enum):

@@ -433,7 +433,7 @@ class FileSystemObject:
         :param exists: TRUE if the object truly exists, FALSE otherwise (you can have a local file that doesn't exist remotely)
         :param hidden: TRUE if it's a hidden file (according to the definition of the hosting OS), FALSE otherwise.
         """
-        this._fullpath = fullpath
+        this.fullpath = fullpath
         this.type = type
         this._size = size
         this._mtime = mtime
@@ -444,12 +444,12 @@ class FileSystemObject:
     @property
     def absolute_path(this) -> str:
         """Gets the absolute path of the fs object"""
-        return this._fullpath.absolute_path
+        return this.fullpath.absolute_path
 
     @property
     def relative_path(this) -> str:
         """Gets the relative path of the fs object"""
-        return this._fullpath.relative_path
+        return this.fullpath.relative_path
 
     @property
     def containing_directory(this) -> str:
@@ -519,6 +519,11 @@ class FileSystemObject:
         """
         this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(
             tzinfo=current_timezone())
+
+
+    @property
+    def has_checksum(this) -> bool:
+        return this._checksum is not None
 
     @property
     def checksum(this) -> str:
@@ -829,6 +834,22 @@ class FileSystem(ABC):
         """
         ...
 
+    def set_file(this, path: AbstractPath, fo: Union[FileSystemObject | None]) -> None:
+        """
+        Sets updated information of a specific file system object
+        :param path: Path of the file/directory
+        :param fo: Updated information. If None, the entry in the cache will be removed
+        """
+
+        if not AbstractPath.is_root_of(path.absolute_path,this.root):
+            raise ValueError(f"{fo.absolute_path} is not rooted in this file system ({this.root})")
+
+        p = path.relative_path
+        if fo is None:
+            if p in this._file_objects_cache.keys():
+                del this._file_objects_cache[p]
+        else:
+            this._file_objects_cache[p] = fo
 
 
     @property
@@ -866,18 +887,7 @@ class FileSystem(ABC):
     def __repr__(this) -> str:
         return str(this)
 
-    def _update_fso_in_cache(this, path: AbstractPath, fo: Union[FileSystemObject | None]) -> None:
-        """
-        Sets updated information of a specific file system object
-        :param path: Path of the file/directory
-        :param fo: Updated information. If None, the entry in the cache will be removed
-        """
-        p = path.relative_path
-        if fo is None:
-            if p in this._file_objects_cache.keys():
-                del this._file_objects_cache[p]
-        else:
-            this._file_objects_cache[p] = fo
+
 
     def _get_fso_from_cache(this, path: AbstractPath) -> Union[FileSystemObject | None]:
         """
@@ -1130,7 +1140,7 @@ class LocalFileSystem(FileSystem):
                                hidden=hidden)
 
         if (this.cached):
-            this._update_fso_in_cache(fullpath, fso)
+            this.set_file(fullpath, fso)
 
         return fso
 
@@ -1228,7 +1238,7 @@ class RemoteFileSystem(FileSystem):
                                exists=True)
 
         if this.cached:
-            this._update_fso_in_cache(fullpath, fso)
+            this.set_file(fullpath, fso)
 
         return fso
 
