@@ -141,11 +141,10 @@ class ComparisonSummary(Widget):
                         download += r.b.size
 
             if (action == ActionType.DELETE):
-                match r.direction:
-                    case ActionDirection.DST2SRC:
-                        delete_source += r.a.size
-                    case ActionDirection.SRC2DST:
-                        delete_target += r.b.size
+                if (r.direction == ActionDirection.DST2SRC) or (r.direction == ActionDirection.BOTH):
+                    delete_source += r.a.size
+                if (r.direction == ActionDirection.SRC2DST) or (r.direction == ActionDirection.BOTH):
+                    delete_target += r.b.size
 
         return (upload, download, delete_source, delete_target)
 
@@ -837,7 +836,8 @@ class DirectoryComparisonDataTable(DataTable):
         Binding("space", "cancel_action", "Cancel Action", show=False),
         Binding("left", "change_direction('left')", "Change Action Direction", show=False),
         Binding("right", "change_direction('right')", "Change Action Direction", show=False),
-        Binding("delete", "delete_file", "Delete File", show=False)
+        Binding("=", "change_direction_to_both", "Apply action to both sides", show=False),
+        Binding("delete", "delete_file", "Delete File", show=False),
     ]
 
     def __init__(this,*args,**kwargs):
@@ -1135,6 +1135,24 @@ class DirectoryComparisonDataTable(DataTable):
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
 
+    def action_change_direction_to_both(this):
+        if (this.changes is None) or (len(this._displayed_actions) == 0):
+            return
+
+        # get the action highlighted by the cursor - ie the one the user wants to change
+        action = this._displayed_actions[this.cursor_row]
+
+        if action.type.supports_both:
+            match action.type:
+                case ActionType.DELETE:
+                    if action.a.exists and action.b.exists:
+                        action.direction = ActionDirection.BOTH
+
+        this.update_action(action)
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
+
+
     def _render_row(this,x:SyncAction):
         match x.type:
             #case ActionType.MKDIR | ActionType.COPY:
@@ -1195,9 +1213,10 @@ class DirectoryComparisonDataTable(DataTable):
             dst = x.b.relative_path
             # dst_details = _make_suitable_details(x.b)
 
-        #TODO: implement deletion both ways
         if x.direction == ActionDirection.DST2SRC:
             frm_src, frm_dest = frm_dest, frm_src
+        elif x.direction == ActionDirection.BOTH:
+            frm_src = frm_dest
 
 
         src_column = Text.from_markup(f"{frm_src}{icon_src}{src}[/]")
@@ -1228,7 +1247,7 @@ class DirectoryComparisonDataTable(DataTable):
             dst_column
         )
 
-
+# TODO: add key bindings list for this widget
 class DisplayFilters(Widget):
 
     def __init__(this, data_table: DirectoryComparisonDataTable,*args,**kwargs):

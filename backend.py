@@ -288,12 +288,15 @@ class SyncAction(AbstractSyncAction):
             _trigger("on_synching", SyncEvent(update))
 
         match this.type:
-            # case ActionType.MKDIR:
-            #     mkdir(this.get_one_path)
             case ActionType.DELETE:
                 try:
-                    p = this.b if this.direction == ActionDirection.SRC2DST else this.a
-                    delete(p.absolute_path)
+                    #p = this.b if this.direction == ActionDirection.SRC2DST else this.a
+                    #delete(p.absolute_path)
+                    if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
+                        delete(this.a.absolute_path)
+                    if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
+                        delete(this.b.absolute_path)
+
                 except Exception:
                     this._status = SyncStatus.FAILED
             case ActionType.UPDATE | ActionType.COPY:
@@ -332,6 +335,8 @@ class SyncAction(AbstractSyncAction):
                     success = y.exists and (x.size == y.size)
                 case ActionType.DELETE:
                     success = not y.exists
+                    if this.direction == ActionDirection.BOTH:
+                        success = success and (not x. exists)
                 case _:
                     success = True
 
@@ -367,6 +372,9 @@ class SynchingManager():
 
     def __getitem__(this, item:int) -> AbstractSyncAction:
         return this._changes[item]
+
+    def __contains__ (this, action:AbstractSyncAction) -> bool:
+        return action in this._changes
 
     def index_of(this, action:AbstractSyncAction) -> int:
         """
@@ -905,14 +913,17 @@ def apply_changes(changes: SynchingManager,
                             # the add_action method raises an exception if the provided action is not bulkable
                             bulky_copy_src2dst.add_action(itm)
                         except ValueError:
-                            # in this case, it's another type of action that will be treated individually
-                            other_actions.add_action(itm)
+                            ...
                     case ActionDirection.DST2SRC:
                         # whatever happens here is the same as before, but in the opposite direction
                         try:
                             bulky_copy_dst2src.add_action(itm)
                         except ValueError:
-                            other_actions.add_action(itm)
+                            ...
+                # if the action has not been added in any of the two bulks, then it's queued in the other action
+                # manager that will take care of it
+                if (itm not in bulky_copy_src2dst) and (itm not in bulky_copy_dst2src):
+                    other_actions.add_action(itm)
 
         # The changes list/iterable is updated with a list containing the two bulks and the other changes to apply
         change_list = [bulky_copy_src2dst, bulky_copy_dst2src, other_actions ]
