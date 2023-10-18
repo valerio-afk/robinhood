@@ -19,7 +19,8 @@
 # SOFTWARE.
 
 import os.path
-from typing import Dict,Tuple, List, Union, ClassVar, Iterable
+from abc import abstractmethod
+from typing import Dict, Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
 from textual import on, work, events
@@ -27,45 +28,116 @@ from textual.screen import ModalScreen
 from textual.app import App, Binding, Widget, ComposeResult
 from textual.suggester import Suggester
 from textual.worker import get_current_worker
-from textual.containers import Container, Horizontal,  Vertical
+from textual.containers import Container, Horizontal, Vertical
 from textual.events import DescendantBlur
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea, Switch
+from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea, \
+    Switch
 from textual.widgets.data_table import Column
 from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
-from backend import SyncMode, RobinHoodBackend,compare_tree, ActionType,SyncAction,SyncEvent,kill_all_subprocesses
-from backend import ActionDirection, FileType, apply_changes, SyncStatus, SyncProgress, FileSystemObject
-from backend import AbstractSyncAction, SynchingManager
-from backend import find_dedupe
+from backend import SyncMode, RobinHoodBackend, compare_tree, ActionType, SyncEvent, kill_all_subprocesses
+from backend import ActionDirection, FileType, apply_changes, FileSystemObject, find_dedupe
+from synching import SyncProgress, AbstractSyncAction, SynchingManager, SyncStatus, SyncDirectionNotPermittedException
+from synching import CopySyncAction, DeleteSyncAction
 from commands import make_command
-from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine,sizeof_fmt
+from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine, sizeof_fmt
 from datetime import datetime
 from config import RobinHoodConfiguration, RobinHoodProfile
 
-_SyncMethodsPrefix:Dict[SyncMode,str] = {
+_SyncMethodsPrefix: Dict[SyncMode, str] = {
     SyncMode.UPDATE: ">>",
     SyncMode.MIRROR: "->",
     SyncMode.SYNC: "<>",
     SyncMode.DEDUPE: "**"
 }
 
-_SyncMethodsNames:Dict[SyncMode,str] = {
+_SyncMethodsNames: Dict[SyncMode, str] = {
     SyncMode.UPDATE: "Update",
     SyncMode.MIRROR: "Mirror",
     SyncMode.SYNC: "Bidirectional sync",
     SyncMode.DEDUPE: "Find deduplicates"
 }
 
-SyncMethods:List[Tuple[str,SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x).split(".")[1].capitalize(), x) for x in SyncMode]
+SyncMethods: List[Tuple[str, SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x).split(".")[1].capitalize(), x) for x in
+                                           SyncMode]
 
-Column.percentage_width = None #to overcome textual limitations :)
+Column.percentage_width = None  # to overcome textual limitations :)
+
+
+def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
+    _make_suitable_icon = lambda x: ":page_facing_up:" if x.exists else ":white_medium_star:[i]"
+
+    a = action.a
+    b = action.b
+
+    match action.status:
+        case SyncStatus.SUCCESS:
+            middle_column = ":white_heavy_check_mark:"
+        case SyncStatus.FAILED:
+            middle_column = ":cross_mark:"
+        case _:
+            middle_column = "-" if action.direction is None else action.direction.value
+
+    return _make_suitable_icon(a) + a.relative_path, middle_column, _make_suitable_icon(b) + b.relative_path
+
+
+def _render_action_as_no_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
+    c1, _, c3 = _render_action(action)
+    return (c1, "-", c3)
+
+
+def _render_action_as_copy_action(action: AbstractSyncAction, *,
+                                  width=10) -> Tuple[RenderableType, RenderableType, RenderableType]:
+    columns= list(_render_action(action))
+
+    colour = "[green]"
+
+    if isinstance(action, CopySyncAction) and action.is_updating:
+        colour = "[bright_green]"
+
+    for i,c in enumerate(columns):
+        columns[i] = f"{colour}{c}[/]"
+
+    c1,c2,c3 = columns
+
+    if action.status == SyncStatus.IN_PROGRESS:
+        progress_update = action.get_update()
+
+        if progress_update is not None:
+            p = progress_update.progress / 100
+            c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
+
+    return c1,c2,c3
+
+def _render_action_as_delete_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
+    c1,c2,c3 = _render_action(action)
+
+    colour = "[red]"
+
+    if (action.direction == ActionDirection.SRC2DST) or (action.direction == ActionDirection.BOTH):
+        c3 = f"[s]{c3}"
+    if (action.direction == ActionDirection.DST2SRC) or (action.direction == ActionDirection.BOTH):
+        c1 = f"[s]{c1}"
+
+    return colour + c1 + "[/]", colour + c2 + "[/]", colour + c3 + "[/]"
+
+
+def _render_row(action:AbstractSyncAction, width=10):
+    match action.type:
+        case ActionType.NOTHING:
+            return _render_action_as_no_action(action)
+        case ActionType.COPY | ActionType.UPDATE:
+            return _render_action_as_copy_action(action, width=width)
+        case ActionType.DELETE:
+            return _render_action_as_delete_action(action)
+
 
 class FileSystemSuggester(Suggester):
 
-    def __init__(this,*args,**kwargs):
+    def __init__(this, *args, **kwargs):
         kwargs['case_sensitive'] = True
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
     async def get_suggestion(this, value: str) -> str | None:
         x = fs_autocomplete(value)
@@ -92,10 +164,10 @@ class ComparisonSummary(Widget):
       }
       """
 
-    KEY_LABELS=['To upload','To download','To delete (source)','To delete (destination)']
+    KEY_LABELS = ['To upload', 'To download', 'To delete (source)', 'To delete (destination)']
 
-    def __init__(this,results:Union[Iterable[SyncAction]|None]=None,*args,**kwargs) -> None:
-        super().__init__(*args,**kwargs)
+    def __init__(this, results: Union[Iterable[AbstractSyncAction] | None] = None, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         this._results = results
 
     @property
@@ -105,7 +177,6 @@ class ComparisonSummary(Widget):
                 if (r.status != SyncStatus.SUCCESS) and (r.type != ActionType.NOTHING):
                     yield r
 
-
     @property
     def has_pending_actions(this):
         for _ in this.pending_actions:
@@ -114,22 +185,22 @@ class ComparisonSummary(Widget):
         return False
 
     @property
-    def results (this):
+    def results(this):
         return this._results
 
     @results.setter
-    def results(this,new_results:Union[Iterable[SyncAction]|None]) -> None:
+    def results(this, new_results: Union[Iterable[AbstractSyncAction] | None]) -> None:
         this._results = new_results
         this.refresh()
 
     @property
-    def transfer_bytes(this) -> Tuple[int,int,int,int]:
+    def transfer_bytes(this) -> Tuple[int, int, int, int]:
         upload = 0
         download = 0
         delete_source = 0
         delete_target = 0
 
-        #if (this.results is not None):
+        # if (this.results is not None):
         for r in this.pending_actions:
             action = r.type
 
@@ -148,7 +219,6 @@ class ComparisonSummary(Widget):
 
         return (upload, download, delete_source, delete_target)
 
-
     def render(this) -> RenderableType:
 
         if (this.results is None):
@@ -166,12 +236,13 @@ class ComparisonSummary(Widget):
         key_style = this.get_component_rich_style("cs--key")
         description_style = this.get_component_rich_style("cs--description")
 
-        for lbl,size in zip(this.KEY_LABELS,this.transfer_bytes):
-            txt = Text.assemble((f" {lbl} ", base_style + description_style), (f" {sizeof_fmt(size)} ",key_style) )
+        for lbl, size in zip(this.KEY_LABELS, this.transfer_bytes):
+            txt = Text.assemble((f" {lbl} ", base_style + description_style), (f" {sizeof_fmt(size)} ", key_style))
 
             text.append_text(txt)
 
         return text
+
 
 class FileDetailsSummary(Widget):
     COMPONENT_CLASSES: ClassVar[set[str]] = ComparisonSummary.COMPONENT_CLASSES
@@ -189,9 +260,8 @@ class FileDetailsSummary(Widget):
       }
       """
 
-    source_file:FileSystemObject = None
-    destination_file:FileSystemObject = None
-
+    source_file: FileSystemObject = None
+    destination_file: FileSystemObject = None
 
     # @property
     # def has_pending_actions(this):
@@ -200,36 +270,35 @@ class FileDetailsSummary(Widget):
     #
     #     return False
 
-    def show(this, src_file:Union[FileSystemObject|None], dest_file:Union[FileSystemObject|None]):
+    def show(this, src_file: Union[FileSystemObject | None], dest_file: Union[FileSystemObject | None]):
         this.source_file = src_file
         this.destination_file = dest_file
         this.refresh()
 
-
     @property
-    def source_size(this) -> Union[int,None]:
+    def source_size(this) -> Union[int, None]:
         return None if (this.source_file is None) \
                        or (this.source_file.size is None) or \
                        (this.source_file.size < 0) \
             else this.source_file.size
 
     @property
-    def source_mtime(this) -> Union[datetime|None]:
+    def source_mtime(this) -> Union[datetime | None]:
         return None if this.source_file is None else this.source_file.mtime
 
     @property
-    def destination_size(this) -> Union[int,None]:
+    def destination_size(this) -> Union[int, None]:
         return None if (this.destination_file is None) \
                        or (this.destination_file.size is None) or \
-                       (this.destination_file.size<0) \
+                       (this.destination_file.size < 0) \
             else this.destination_file.size
 
     @property
-    def destination_mtime(this) -> Union[datetime|None]:
+    def destination_mtime(this) -> Union[datetime | None]:
         return None if this.destination_file is None else this.destination_file.mtime
 
     @property
-    def filename(this) -> Union[str|None]:
+    def filename(this) -> Union[str | None]:
         if (this.source_file is None) and (this.destination_file is None):
             return None
 
@@ -238,7 +307,6 @@ class FileDetailsSummary(Widget):
         _, filename = os.path.split(fullpath.absolute_path)
 
         return filename
-
 
     def render(this) -> RenderableType:
 
@@ -257,56 +325,54 @@ class FileDetailsSummary(Widget):
         key_style = this.get_component_rich_style("cs--key")
         description_style = this.get_component_rich_style("cs--description")
 
-        show_formatted_size = lambda x : sizeof_fmt(x) if x is not None else "-"
+        show_formatted_size = lambda x: sizeof_fmt(x) if x is not None else "-"
 
         local_size = show_formatted_size(this.source_size)
-        dest_size  = show_formatted_size(this.destination_size)
+        dest_size = show_formatted_size(this.destination_size)
 
-
-        text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename,key_style)))
+        text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename, key_style)))
         text.append_text(Text.assemble((f" Size (source) ", base_style + description_style), (local_size, key_style)))
-        text.append_text(Text.assemble((f" Size (destination) ", base_style + description_style), (dest_size, key_style)))
-
+        text.append_text(
+            Text.assemble((f" Size (destination) ", base_style + description_style), (dest_size, key_style)))
 
         return text
 
 
-
 class RobinHoodTopBar(Container):
     def __init__(this,
-                 src:Union[str|None]=None,
-                 dst:Union[str|None]=None,
-                 mode:Union[SyncMode|None]=None,
+                 src: Union[str | None] = None,
+                 dst: Union[str | None] = None,
+                 mode: Union[SyncMode | None] = None,
                  *args,
                  **kwargs
-                ) -> None:
+                 ) -> None:
+        this._src: Union[str | None] = src
+        this._dst: Union[str | None] = dst
+        this._mode: Union[SyncMode | None] = mode
 
-        this._src:Union[str|None] = src
-        this._dst:Union[str|None] = dst
-        this._mode:Union[SyncMode|None] = mode
-
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
     def compose(this) -> ComposeResult:
         yield Label("Welcome to RobinHood", id="status_text")
         yield Horizontal(
-            Input(id="source_text_area", placeholder="Source directory",suggester=FileSystemSuggester(),value=this._src),
+            Input(id="source_text_area", placeholder="Source directory", suggester=FileSystemSuggester(),
+                  value=this._src),
             Button("Start", id="work_launcher", variant="success"),
-            Input(id="dest_text_area", placeholder="Destination directory",value=this._dst),
-        Select(SyncMethods, prompt="Sync Mode...", id="syncmethod",value=this._mode),
+            Input(id="dest_text_area", placeholder="Destination directory", value=this._dst),
+            Select(SyncMethods, prompt="Sync Mode...", id="syncmethod", value=this._mode),
             id="textbox_container"
         )
 
-class RobinHoodRemoteList(Static):
-    def __init__(this,*args,**kwargs):
-        super().__init__(*args,**kwargs)
 
-        this.remotes:List[Tuple[str,...]] = get_rclone_remotes()
-        this.border_title="Remotes"
+class RobinHoodRemoteList(Static):
+    def __init__(this, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        this.remotes: List[Tuple[str, ...]] = get_rclone_remotes()
+        this.border_title = "Remotes"
 
     def compose(this) -> ComposeResult:
         yield DataTable(cursor_type="row")
-
 
     def on_mount(this) -> None:
         header = ("Type", "Drive")
@@ -319,11 +385,10 @@ class RobinHoodRemoteList(Static):
 
 
 class RobinHoodExcludePath(Static):
-    def __init__(this,profile:RobinHoodProfile,*args,**kwargs):
-        super().__init__(*args,**kwargs)
-        this.border_title="Path to Exclude"
+    def __init__(this, profile: RobinHoodProfile, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        this.border_title = "Path to Exclude"
         this._profile = profile
-
 
     @property
     def paths(this) -> Iterable[str]:
@@ -353,7 +418,7 @@ class RobinHoodExcludePath(Static):
             textarea = this.query_one(TextArea)
             textarea.load_text("\n".join(this.paths))
 
-        this.query_one("#exclude_hidden").value=this.exclude_hidden
+        this.query_one("#exclude_hidden").value = this.exclude_hidden
         this.query_one("#deep_comparisons").value = this.deep_comparisons
 
     @on(events.Hide)
@@ -362,7 +427,7 @@ class RobinHoodExcludePath(Static):
         new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
 
         this._profile.exclusion_filters = new_filters
-        this._profile.exclude_hidden_files =this.query_one("#exclude_hidden").value
+        this._profile.exclude_hidden_files = this.query_one("#exclude_hidden").value
         this._profile.deep_comparisons = this.query_one("#deep_comparisons").value
 
 
@@ -372,98 +437,95 @@ class PromptProfileNameModalScreen(ModalScreen):
 
     def action_refresh(this):
         this.refresh()
+
     def compose(self) -> ComposeResult:
         vertical = Vertical(
             Label("Type the name for the new profile"),
             Input(placeholder="Profile name", id="profile_name"),
-        id="modal-container")
-
+            id="modal-container")
 
         yield vertical
 
-    def profile_name(this)->str:
+    def profile_name(this) -> str:
         return this.query_one("profile_name").value
 
     def action_force_close(this):
         this.query_one("#profile_name").value = ""
         this.app.pop_screen()
 
-
     @on(Input.Submitted)
     def on_submitted(this):
         name = this.query_one("#profile_name").value
-        if (len(name)>0):
+        if (len(name) > 0):
             this.app.profile.name = name
             try:
-                RobinHoodConfiguration().add_profile(name,this.app.profile)
+                RobinHoodConfiguration().add_profile(name, this.app.profile)
                 this.app.pop_screen()
                 this.app.save_profile()
             except ValueError:
-                this.query_one("Label").update(Text.from_markup(f"[magenta]Profile name [yellow u]{name}[/yellow u] already in use[/]"))
+                this.query_one("Label").update(
+                    Text.from_markup(f"[magenta]Profile name [yellow u]{name}[/yellow u] already in use[/]"))
         else:
             this.action_force_close()
-
 
 
 class RobinHood(App):
     CSS_PATH = "main_style.tcss"
     SCREENS = {"NewProfile": PromptProfileNameModalScreen(classes="modal-window")}
-    BINDINGS =  [
-                Binding("ctrl+c", "quit", "Quit", priority=True),
-                Binding("ctrl+r","show_remotes","Toggle Remote"),
-                Binding("ctrl+p", "show_filters", "Toggle Filter List"),
-                Binding("ctrl+t", "switch_paths", "Switch Source/Destination Path"),
-                Binding("ctrl+s","save_profile","Save profile")
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", priority=True),
+        Binding("ctrl+r", "show_remotes", "Toggle Remote"),
+        Binding("ctrl+p", "show_filters", "Toggle Filter List"),
+        Binding("ctrl+t", "switch_paths", "Switch Source/Destination Path"),
+        Binding("ctrl+s", "save_profile", "Save profile")
     ]
 
-    def __init__(this, profile:Union[RobinHoodProfile|None]=None, *args, **kwargs): #(this, src=   None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
+    def __init__(this, profile: Union[RobinHoodProfile | None] = None, *args,
+                 **kwargs):  # (this, src=   None, dst=None, syncmode=SyncMode.UPDATE, *args, **kwargs):
         super().__init__(*args, **kwargs)
         this.profile = profile if profile is not None else RobinHoodConfiguration().current_profile
-        this._remote_list_overlay:RobinHoodRemoteList = RobinHoodRemoteList( id="remote_list")
-        this._tree_pane:DirectoryComparisonDataTable = DirectoryComparisonDataTable(id="tree_pane")
-        this._summary_pane:ComparisonSummary = ComparisonSummary(id="summary")
-        this._details_pane:FileDetailsSummary = FileDetailsSummary(id="file_details")
-        this._progress_bar:ProgressBar = ProgressBar(show_eta=False,id="synch_progbar")
-        this._filter_list:RobinHoodExcludePath = RobinHoodExcludePath(profile=profile, id="filter_list")
-        this._backend:RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
-        this._display_filters:DisplayFilters = DisplayFilters(this._tree_pane,classes="hidden")
+        this._remote_list_overlay: RobinHoodRemoteList = RobinHoodRemoteList(id="remote_list")
+        this._tree_pane: DirectoryComparisonDataTable = DirectoryComparisonDataTable(id="tree_pane")
+        this._summary_pane: ComparisonSummary = ComparisonSummary(id="summary")
+        this._details_pane: FileDetailsSummary = FileDetailsSummary(id="file_details")
+        this._progress_bar: ProgressBar = ProgressBar(show_eta=False, id="synch_progbar")
+        this._filter_list: RobinHoodExcludePath = RobinHoodExcludePath(profile=profile, id="filter_list")
+        this._backend: RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
+        this._display_filters: DisplayFilters = DisplayFilters(this._tree_pane, classes="hidden")
 
-    #TODO: this seems computationally intensive. Can we find another hook/event?
+    # TODO: this seems computationally intensive. Can we find another hook/event?
     def post_display_hook(this) -> None:
         this._tree_pane.adjust_column_sizes()
 
-
-    def set_status(this, text:str) -> None:
+    def set_status(this, text: str) -> None:
         lbl = Text.from_markup(text)
-        lbl.no_wrap=True
-        lbl.overflow=("ellipsis")
+        lbl.no_wrap = True
+        lbl.overflow = ("ellipsis")
 
         this.query_one("#status_text").update(lbl)
 
     @on(Select.Changed, "#syncmethod")
-    def syncmethod_changed(this, event:Select.Changed) -> None:
+    def syncmethod_changed(this, event: Select.Changed) -> None:
         this.query_one("#syncmethod SelectCurrent").remove_class("error")
 
         this._update_job_related_interface()
 
-    @on(DescendantBlur,"Input")
-    def on_blur_input(this, event:DescendantBlur) -> None:
+    @on(DescendantBlur, "Input")
+    def on_blur_input(this, event: DescendantBlur) -> None:
         this._validate_dir_inputs(event.widget)
 
-    def _validate_dir_inputs(this,widget:Widget) -> bool:
-        value:str = widget.value
-        fail:bool = False
-
+    def _validate_dir_inputs(this, widget: Widget) -> bool:
+        value: str = widget.value
+        fail: bool = False
 
         try:
-            filesystem = fs_auto_determine(value,parse_all=True)
+            filesystem = fs_auto_determine(value, parse_all=True)
             if filesystem is None:
-                fail=True
+                fail = True
             # else:
             #     setattr(this,attr,filesystem)
         except FileNotFoundError:
             fail = True
-
 
         widget.set_class(not fail, "-valid")
         widget.set_class(fail, "-invalid")
@@ -480,7 +542,7 @@ class RobinHood(App):
         return this.query_one("#source_text_area").value
 
     @src.setter
-    def src(this,value:str) -> str:
+    def src(this, value: str) -> str:
         this.query_one("#source_text_area").value = value
 
     @property
@@ -488,11 +550,11 @@ class RobinHood(App):
         return this.query_one("#dest_text_area").value
 
     @dst.setter
-    def dst(this, value:str) -> str:
+    def dst(this, value: str) -> str:
         this.query_one("#dest_text_area").value = value
 
     @property
-    def syncmode(this) -> SyncMode :
+    def syncmode(this) -> SyncMode:
         return this.query_one("#syncmethod").value
 
     @property
@@ -515,13 +577,12 @@ class RobinHood(App):
 
         return False
 
-
     @property
     def show_progressbar(this):
         return this._progress_bar.has_class("synching")
 
     @show_progressbar.setter
-    def show_progressbar(this, show:bool):
+    def show_progressbar(this, show: bool):
         if show:
             this._progress_bar.add_class("synching")
         else:
@@ -529,21 +590,21 @@ class RobinHood(App):
 
     def _kill_workers(this) -> None:
         for w in this.workers:
-            if w.name in ["comparison","synching"]:
+            if w.name in ["comparison", "synching"]:
                 w.cancel()
 
     def _update_job_related_interface(this) -> None:
         button = this.query_one("#work_launcher")
         enablable = this.query("#topbar Input, #topbar Select")
 
-        this._display_filters.set_class(this._tree_pane.is_empty,"hidden")
+        this._display_filters.set_class(this._tree_pane.is_empty, "hidden")
         this._display_filters.set_class(not this._tree_pane.is_empty, "displayed")
 
         if not this.is_working:
             if (this._summary_pane.has_pending_actions):
                 button.variant = "warning"
                 button.label = "Synch"
-                this.bind("ctrl+n","compare_again",description="Re-run comparison")
+                this.bind("ctrl+n", "compare_again", description="Re-run comparison")
             else:
                 button.variant = "success"
                 button.label = "Start"
@@ -561,8 +622,7 @@ class RobinHood(App):
             this.show_progressbar = this.is_comparing
 
             for x in enablable:
-                x.disabled=True
-
+                x.disabled = True
 
     def action_save_profile(this):
         if (this.profile.name is None):
@@ -576,7 +636,6 @@ class RobinHood(App):
         cfg.flush()
         this.set_status(f"Profile [yellow]{this.profile.name}[/] saved.")
 
-
     def action_compare_again(this) -> None:
         this._summary_pane.results = None
         this._tree_pane.show_results(None)
@@ -586,7 +645,6 @@ class RobinHood(App):
         this.src, this.dst = this.dst, this.src
         this._update_profile_from_ui()
 
-
     def _update_profile_from_ui(this):
         this.profile.source_path = this.src
         this.profile.destination_path = this.dst
@@ -595,23 +653,21 @@ class RobinHood(App):
     def on_ready(this) -> None:
         this._update_job_related_interface()
 
-
     @on(DataTable.RowHighlighted)
-    def on_row_selected(this, event:DataTable.RowHighlighted) -> None:
+    def on_row_selected(this, event: DataTable.RowHighlighted) -> None:
 
         if event.cursor_row >= 0:
-            index = event.cursor_row #int(event.row_key.value)
+            index = event.cursor_row  # int(event.row_key.value)
 
             action = this._tree_pane[index]
 
             this._details_pane.show(action.a, action.b)
 
-
-    @on(Button.Pressed,"#work_launcher")
-    async def work_launcher_pressed(this,event:Button.Pressed) -> None:
+    @on(Button.Pressed, "#work_launcher")
+    async def work_launcher_pressed(this, event: Button.Pressed) -> None:
         if this.is_working:
             for w in this.workers:
-                if w.name in ["comparison","synching"]:
+                if w.name in ["comparison", "synching"]:
                     w.cancel()
 
             kill_all_subprocesses()
@@ -626,10 +682,11 @@ class RobinHood(App):
                 this.bell()
                 return
 
-            if not this._validate_dir_inputs(this.query_one("#source_text_area")) :
+            if not this._validate_dir_inputs(this.query_one("#source_text_area")):
                 return
 
-            if  (this.syncmode != SyncMode.DEDUPE) and  (not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
+            if (this.syncmode != SyncMode.DEDUPE) and (
+            not this._validate_dir_inputs(this.query_one("#dest_text_area"))):
                 return
 
             if this.syncmode == SyncMode.DEDUPE:
@@ -639,9 +696,9 @@ class RobinHood(App):
 
         this._update_job_related_interface()
 
-    @work(exclusive=True,name="comparison",thread=True)
-    def _run_comparison(this, mode:SyncMode) -> None:
-        result = compare_tree(this.src, this.dst,mode=mode, profile=this.profile, eventhandler=this._backend)
+    @work(exclusive=True, name="comparison", thread=True)
+    def _run_comparison(this, mode: SyncMode) -> None:
+        result = compare_tree(this.src, this.dst, mode=mode, profile=this.profile, eventhandler=this._backend)
         this.call_from_thread(this.show_results, result)
 
     @work(exclusive=True, name="comparison", thread=True)
@@ -649,29 +706,23 @@ class RobinHood(App):
         result = find_dedupe(this.src, this._backend)
         this.call_from_thread(this.show_results, result)
 
-    @work(exclusive=True,name="synching",thread=True)
+    @work(exclusive=True, name="synching", thread=True)
     def _run_synch(this) -> None:
         apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
+    def update_progressbar(this, update: Union[SyncProgress | SyncEvent]):
+        if isinstance(update, SyncProgress):
+            this._progress_bar.update(total=update.bytes_total, progress=update.bytes_transferred)
+        elif isinstance(update, SyncEvent):
+            this._progress_bar.update(total=update.total, progress=update.processed)
 
-
-
-    def update_progressbar(this, update:Union[SyncProgress|SyncEvent]):
-        if isinstance(update,SyncProgress):
-            this._progress_bar.update(total=update.bytes_total,progress=update.bytes_transferred)
-        elif isinstance(update,SyncEvent):
-            this._progress_bar.update(total=update.total,progress=update.processed)
-
-
-
-    def show_results(this,results:Union[SynchingManager|None]) -> None:
+    def show_results(this, results: Union[SynchingManager | None]) -> None:
         this._tree_pane.show_results(results)
         this._summary_pane.results = results
         this._update_job_related_interface()
 
-    def update_row_at(this,action:SyncAction):
+    def update_row_at(this, action: AbstractSyncAction):
         this._tree_pane.update_action(action)
-
 
     def compose(this) -> ComposeResult:
         this.screen.title = "🏹 Robin Hood"
@@ -709,13 +760,14 @@ class RobinHood(App):
 
     def action_show_filters(this) -> None:
         this.toggle_overlay(this._filter_list)
-    def toggle_overlay(this,overlay:Widget) -> None:
-        match(overlay.styles.display):
+
+    def toggle_overlay(this, overlay: Widget) -> None:
+        match (overlay.styles.display):
             case "none":
                 overlay.styles.display = "block"
 
                 for itm in this.query(".overlayable"):
-                    itm.disabled=True
+                    itm.disabled = True
 
             case _:
                 overlay.styles.display = "none"
@@ -731,15 +783,13 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def __init__(this, gui: RobinHood) -> None:
         this._gui = gui
 
+    def update_status(this, text: str) -> None:
+        this._gui.call_from_thread(this._gui.set_status, text)
 
-    def update_status(this,text:str)->None:
-        this._gui.call_from_thread(this._gui.set_status,text)
-
-    def update_progressbar(this, update:[SyncProgress|SyncEvent]):
+    def update_progressbar(this, update: [SyncProgress | SyncEvent]):
         this._gui.call_from_thread(this._gui.update_progressbar, update)
 
-
-    def update_table_row(this, action:SyncAction):
+    def update_table_row(this, action: AbstractSyncAction):
         this._gui.call_from_thread(this._gui.update_row_at, action)
 
     def clean_up(this):
@@ -750,35 +800,32 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
         if (get_current_worker().is_cancelled):
             raise InterruptedError()
 
-
-    def before_comparing(this, event:SyncEvent) -> None:
+    def before_comparing(this, event: SyncEvent) -> None:
         this._check_running_status()
         this.update_status(f"Initiating directory analysis [underline yellow]{event.value}[/]")
 
-
-    def on_comparing(this, event:SyncEvent) -> None:
+    def on_comparing(this, event: SyncEvent) -> None:
         this._check_running_status()
         this.update_status(f"Analysing [underline yellow]{event.value}[/]")
         this.update_progressbar(event)
 
-
-    def after_comparing(this, event:SyncEvent) -> None:
+    def after_comparing(this, event: SyncEvent) -> None:
         this.clean_up()
         this.update_status(f"[green]Directory comparison finished[/]")
 
-    def before_synching(this, event:SyncEvent) -> None:
+    def before_synching(this, event: SyncEvent) -> None:
         this.update_status(f"Initiating synchronisation ...")
 
-    def on_synching(this, event:SyncEvent) -> None:
+    def on_synching(this, event: SyncEvent) -> None:
         # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
         this._check_running_status()
 
         value = event.value
 
-        if isinstance(value, SyncAction):
+        if isinstance(value, AbstractSyncAction):
             this.update_table_row(value)
 
-        elif isinstance(value,SyncProgress):
+        elif isinstance(value, SyncProgress):
             update = value
 
             # Format information about transfer speed
@@ -801,7 +848,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                             case ActionType.UPDATE | ActionType.COPY:
                                 desc_action = "Copying"
                             case _:
-                                desc_action = "Doing something with" # this case should never happen right?
+                                desc_action = "Doing something with"  # this case should never happen right?
 
                         # Compose the string to be displayed in the TUI
                         desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
@@ -820,9 +867,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     desc = f"Processing [bold]{len(update.prog_transferring)}[/] file(s) {transf_speed}"
                     this.update_status(desc)
 
-
-
-    def after_synching(this, event:SyncEvent) -> None:
+    def after_synching(this, event: SyncEvent) -> None:
         this.clean_up()
         this.update_status(f"[green]Synchronisation finished[/]")
 
@@ -831,7 +876,6 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
 
 class DirectoryComparisonDataTable(DataTable):
-
     BINDINGS = [
         Binding("space", "cancel_action", "Cancel Action", show=False),
         Binding("left", "change_direction('left')", "Change Action Direction", show=False),
@@ -840,22 +884,21 @@ class DirectoryComparisonDataTable(DataTable):
         Binding("delete", "delete_file", "Delete File", show=False),
     ]
 
-    def __init__(this,*args,**kwargs):
-        kwargs["cursor_type"]="row"
+    def __init__(this, *args, **kwargs):
+        kwargs["cursor_type"] = "row"
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
-        this.add_column(Text.from_markup("Source Directories",overflow="ellipsis"),key="src",width=45)
-        this.add_column(Text.from_markup("Action",overflow="ellipsis"),key="action",width=7)
-        this.add_column(Text.from_markup("Destination Directories",overflow="ellipsis"),key="dst",width=45)
+        this.add_column(Text.from_markup("Source Directories", overflow="ellipsis"), key="src", width=45)
+        this.add_column(Text.from_markup("Action", overflow="ellipsis"), key="action", width=7)
+        this.add_column(Text.from_markup("Destination Directories", overflow="ellipsis"), key="dst", width=45)
 
-        this._sync_manager:[SynchingManager|None] = None
-        this._displayed_actions:List[SyncAction] = []
+        this._sync_manager: [SynchingManager | None] = None
+        this._displayed_actions: List[AbstractSyncAction] = []
 
         this._show_no_action = True
         this._show_copy_update = True
         this._show_delete = True
-
 
     def adjust_column_sizes(this) -> None:
         """
@@ -863,16 +906,15 @@ class DirectoryComparisonDataTable(DataTable):
         """
 
         # the overall available space is given by the sie of the widget -6 (not sure where this comes from, but it works)
-        psize = this.size.width-6
+        psize = this.size.width - 6
 
         # in the case the height of the table is larger than the hight of the visible area, it means the scroll bar is
         # visible, eating more horizontal space
         if this.virtual_size.height > this.size.height:
-            psize-=2 #thickness of the scrollbar
+            psize -= 2  # thickness of the scrollbar
 
-
-        #total size of all columns
-        tot_size=0
+        # total size of all columns
+        tot_size = 0
 
         # colums in the table
         columns = list(this.columns.values())
@@ -888,7 +930,7 @@ class DirectoryComparisonDataTable(DataTable):
                 c.percentage_width = c.width
 
             # calculate the actual size from the percentage
-            c.width = int( psize * (c.percentage_width / 100))
+            c.width = int(psize * (c.percentage_width / 100))
 
             # update the total size
             tot_size += c.width
@@ -900,32 +942,31 @@ class DirectoryComparisonDataTable(DataTable):
             delta = psize - tot_size
 
             # making bigger or smaller?
-            unit = 1 if delta>0 else -1
+            unit = 1 if delta > 0 else -1
 
-            if (delta<0):
-                delta*=-1
+            if (delta < 0):
+                delta *= -1
 
             i = 0
 
             # each column size is increased/decreased by 1 at each iteration until there's anything else to
             # ridestribute.
-            while delta>0:
-                columns[i%len(columns)].width += unit
-                i+=1
-                delta-=1
+            while delta > 0:
+                columns[i % len(columns)].width += unit
+                i += 1
+                delta -= 1
 
         this.show_horizontal_scrollbar = False
 
         # refresh the widget
         this.refresh()
 
-
     @property
     def show_no_action(this) -> bool:
         return this._show_no_action
 
     @show_no_action.setter
-    def show_no_action(this, value:bool) -> None:
+    def show_no_action(this, value: bool) -> None:
         refresh = this._show_no_action != value
 
         this._show_no_action = value
@@ -938,19 +979,20 @@ class DirectoryComparisonDataTable(DataTable):
         return this._show_copy_update
 
     @show_copy_update.setter
-    def show_copy_update(this, value:bool) -> None:
+    def show_copy_update(this, value: bool) -> None:
         refresh = this._show_copy_update != value
 
         this._show_copy_update = value
 
         if refresh:
             this.refresh_table()
+
     @property
     def show_delete(this) -> bool:
         return this._show_delete
 
     @show_delete.setter
-    def show_delete(this, value:bool) -> None:
+    def show_delete(this, value: bool) -> None:
         refresh = this._show_delete != value
 
         this._show_delete = value
@@ -962,12 +1004,11 @@ class DirectoryComparisonDataTable(DataTable):
     def is_empty(this) -> bool:
         return (this.changes is None) or (len(this.changes) == 0)
 
-
-    def __getitem__(this, index:int) -> AbstractSyncAction:
+    def __getitem__(this, index: int) -> AbstractSyncAction:
         return this.changes[index]
 
     @property
-    def changes (this) -> Union[SynchingManager | None]:
+    def changes(this) -> Union[SynchingManager | None]:
         """
         Returns the changes to be applied to the source/destination folders
 
@@ -975,14 +1016,14 @@ class DirectoryComparisonDataTable(DataTable):
         """
         return this._sync_manager
 
-    def show_results(this,changes:SynchingManager) -> None:
+    def show_results(this, changes: SynchingManager) -> None:
 
         if (changes is None):
             return None
 
         this._sync_manager = changes
 
-        this._sync_manager.sort(key=lambda x : (len(AbstractPath.split(x.a.absolute_path)), x.a.absolute_path))
+        this._sync_manager.sort(key=lambda x: (len(AbstractPath.split(x.a.absolute_path)), x.a.absolute_path))
 
         this.refresh_table()
 
@@ -991,27 +1032,25 @@ class DirectoryComparisonDataTable(DataTable):
     def refresh_table(this):
         this.clear(columns=False)
 
-        if (this._sync_manager  is None):
+        if (this._sync_manager is None):
             return None
 
         this._displayed_actions = []
 
         for itm in this._sync_manager:
             if (this.show_no_action and (itm.type == ActionType.NOTHING)) or \
-               (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or \
-               (this.show_delete and (itm.type == ActionType.DELETE)):
+                    (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or \
+                    (this.show_delete and (itm.type == ActionType.DELETE)):
                 this._displayed_actions.append(itm)
 
         rendered_rows = [None] * len(this._displayed_actions)
 
-        for i,x in enumerate(this._displayed_actions):
+        for i, x in enumerate(this._displayed_actions):
             rendered_rows[i] = this._render_row(x)
 
         this.add_rows(rendered_rows)
 
-
-
-    def update_action(this, action:SyncAction) -> None:
+    def update_action(this, action: AbstractSyncAction, replace_with: Union[AbstractSyncAction | None] = None) -> None:
         """
         Re-render a specific action in the table
 
@@ -1025,37 +1064,23 @@ class DirectoryComparisonDataTable(DataTable):
             # Finds the index of the given action
             i = this._displayed_actions.index(action)
 
+            if replace_with is not None:
+                this._sync_manager.replace(action, replace_with)
+                this._displayed_actions[i] = action = replace_with
+
             # The action is re-rendered
             columns = this._render_row(action)
 
             # Colums of the i-th row are updated
             for j in range(len(this.columns)):
-                this.update_cell_at(Coordinate(i,j),columns[j],update_width=False)
+                this.update_cell_at(Coordinate(i, j), columns[j], update_width=False)
 
             this.refresh_row(i)
 
-        except ValueError: # This exception is raised when the .index_of method fails
+        except ValueError:  # This exception is raised when the .index_of method fails
             ...
 
-
     def action_cancel_action(this):
-        if (this.changes is None) or (len(this._displayed_actions)==0):
-            return
-
-        # get the action highlighted by the cursor - ie the one the user wants to change
-        action = this._displayed_actions[this.cursor_row]
-
-        # do we really need this guard clause?
-        if (action is None):
-            return
-
-        action.type = ActionType.NOTHING
-
-        this.update_action(action)
-        this.app.query_one("#summary").refresh()
-        this.app._update_job_related_interface()
-
-    def action_change_direction(this, key):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
@@ -1066,43 +1091,40 @@ class DirectoryComparisonDataTable(DataTable):
         if (action is None):
             return
 
-        if key == "right":
-            new_direction = ActionDirection.SRC2DST
-            src = action.a
-            dst = action.b
-        elif key == "left":
-            # in case of the left key, source and destination are swapped and DST2SRC is the new direction
-            # to apply
-            new_direction = ActionDirection.DST2SRC
-            src = action.b
-            dst = action.a
+        new_action = this._sync_manager.cancel_action(action)
 
-        # we can distinguish to case: either the current action is nothing and we want to impose a sync action
-        # or it's not nothing and we want to swap the direction of syching
+        this.update_action(action, new_action)
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
 
-        # Let's deal with the first case
+    def action_change_direction(this, key: str) -> None:
+        """
+        Change the direction of an action. If the action is of type NoSyncAction, it attempts to make it a
+        copy/update action (if the direction is permitted)
+
+        :param key: A strig representing "left" or "right"
+        """
+        if (this.changes is None) or (len(this._displayed_actions) == 0):
+            return
+
+        action = this._displayed_actions[this.cursor_row]
+        new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
+
+        new_action = None
+
         if action.type == ActionType.NOTHING:
-            # If I want to transfer a file from source to destiantion, it must exist in source
-            if (src is not None) and src.exists:
-                # if so, all suitable changes are applied
-                action.direction = new_direction
-                action.type = ActionType.UPDATE if action.b.exists else ActionType.COPY
-        elif action.direction != new_direction:
-            # this is the case where we want to swap the action direction
+            # in the case the action is nothing, it makes an attempt to convert into copy/update
+            try:
+                new_action = CopySyncAction(action.a, action.b, direction=new_dir)
+            except SyncDirectionNotPermittedException:
+                ...  # it's already nothing - so nothing to do
+        elif action.direction != new_dir:
+            try:
+                action.swap_direction()
+            except SyncDirectionNotPermittedException:
+                new_action = this._sync_manager.cancel_action(action)
 
-            # in case the action is copy/update, as before, we need to make sure if the file in source exists.
-            # However, in case of deletion, we need to make sure the file exist in destination (otherwise we
-            # cannot delete anything)
-
-            # if everything matches the direction is changed
-            if (((action.type == ActionType.UPDATE) or (action.type == action.type.COPY)) and src.exists) or \
-                    ((action.type == ActionType.DELETE) and dst.exists):
-                action.direction = new_direction
-            else:
-                # otherwise, it set to Nothing
-                action.type = ActionType.NOTHING
-
-        this.update_action(action)
+        this.update_action(action, new_action)
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
 
@@ -1110,28 +1132,10 @@ class DirectoryComparisonDataTable(DataTable):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
-        # get the action highlighted by the cursor - ie the one the user wants to change
         action = this._displayed_actions[this.cursor_row]
+        new_action = this._sync_manager.convert_to_delete(action)
 
-        # do we really need this guard clause?
-        if (action is None):
-            return
-
-        action.type = ActionType.DELETE
-
-        if action.direction is None:
-            action.direction = ActionDirection.SRC2DST
-
-        match action.direction:
-            case ActionDirection.SRC2DST:
-                if not action.b.exists:
-                    action.direction = ActionDirection.DST2SRC
-
-            case ActionDirection.DST2SRC:
-                if not action.a.exists:
-                    action.direction = ActionDirection.SRC2DST
-
-        this.update_action(action)
+        this.update_action(action, new_action)
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
 
@@ -1142,136 +1146,158 @@ class DirectoryComparisonDataTable(DataTable):
         # get the action highlighted by the cursor - ie the one the user wants to change
         action = this._displayed_actions[this.cursor_row]
 
-        if action.type.supports_both:
-            match action.type:
-                case ActionType.DELETE:
-                    if action.a.exists and action.b.exists:
-                        action.direction = ActionDirection.BOTH
+        try:
 
-        this.update_action(action)
-        this.app.query_one("#summary").refresh()
-        this.app._update_job_related_interface()
+            action.apply_both_sides()
 
+            this.update_action(action)
+            this.app.query_one("#summary").refresh()
+            this.app._update_job_related_interface()
+        except (SyncDirectionNotPermittedException, FileNotFoundError):
+            ...
 
-    def _render_row(this,x:SyncAction):
-        match x.type:
-            #case ActionType.MKDIR | ActionType.COPY:
-            case ActionType.COPY:
-                dir_frm = frm_src = frm_dest = "[green]"
-            case ActionType.UPDATE:
-                dir_frm = frm_src = frm_dest = "[bright_green]"
-            case ActionType.DELETE:
-                frm_src = '[magenta]'
-                frm_dest = '[s magenta]'
-                dir_frm = "[magenta]"
-            case ActionType.UNKNOWN:
-                dir_frm = frm_src = frm_dest = "[yellow]"
+    def _render_row(this, action:AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
+        c1, c2, c3 = _render_row(action, this.ordered_columns[1].width)
 
-            case _:
-                dir_frm = frm_src = frm_dest = "[grey]"
+        c1 = Text.from_markup(c1)
 
-        match x.type:
-            case ActionType.NOTHING: direction = "-"
-            case ActionType.UNKNOWN: direction = "?"
-            case _: direction = x.direction.value
+        try:
+            c2 = Text.from_markup(c2, justify="center")
+        except TypeError:
+            ... # in this case, the c2 cannot be converted into a Text object and will keep as is
 
-        src = ""
-        dst = ""
+        c3 = Text.from_markup(c3)
 
-        # src_details = ""
-        # dst_details = ""
+        c1.overflow = c3.overflow = "ellipsis"
 
-        icon_src = ""
-        icon_dst = ""
+        c1.no_wrap = c2.no_wrap = True
 
-        def _make_suitable_icon(x:FileSystemObject):
-            if x.exists:
-                return ":open_file_folder:" if x.type == FileType.DIR else ":page_facing_up:"
-            else:
-                return ":white_medium_star:[i]"
+        return c1,c2,c3
 
-        # def _make_suitable_details(x:FileSystemObject):
-        #     spacing = " " * 3
-        #     if x.exists:
-        #         fname = x.filename
-        #         size = sizeof_fmt(x.size) if x.size is not None else "-"
-        #         hash = x.checksum if x.has_checksum else "-"
-        #
-        #         return f"[b]Name:[/b] {fname}{spacing}[b]Size:[/b] {size}{spacing}[b]Hash:[/b] {hash}"
-        #     else:
-        #         return "File not existing here"
+    # def _render_row(this, x: AbstractSyncAction):
+    #     match x.type:
+    #         # case ActionType.MKDIR | ActionType.COPY:
+    #         case ActionType.COPY:
+    #             dir_frm = frm_src = frm_dest = "[green]"
+    #         case ActionType.UPDATE:
+    #             dir_frm = frm_src = frm_dest = "[bright_green]"
+    #         case ActionType.DELETE:
+    #             frm_src = '[magenta]'
+    #             frm_dest = '[s magenta]'
+    #             dir_frm = "[magenta]"
+    #         case ActionType.UNKNOWN:
+    #             dir_frm = frm_src = frm_dest = "[yellow]"
+    #
+    #         case _:
+    #             dir_frm = frm_src = frm_dest = "[grey]"
+    #
+    #     match x.type:
+    #         case ActionType.NOTHING:
+    #             direction = "-"
+    #         case ActionType.UNKNOWN:
+    #             direction = "?"
+    #         case _:
+    #             direction = x.direction.value
+    #
+    #     src = ""
+    #     dst = ""
+    #
+    #     # src_details = ""
+    #     # dst_details = ""
+    #
+    #     icon_src = ""
+    #     icon_dst = ""
+    #
+    #     def _make_suitable_icon(x: FileSystemObject):
+    #         if x.exists:
+    #             return ":open_file_folder:" if x.type == FileType.DIR else ":page_facing_up:"
+    #         else:
+    #             return ":white_medium_star:[i]"
+    #
+    #     # def _make_suitable_details(x:FileSystemObject):
+    #     #     spacing = " " * 3
+    #     #     if x.exists:
+    #     #         fname = x.filename
+    #     #         size = sizeof_fmt(x.size) if x.size is not None else "-"
+    #     #         hash = x.checksum if x.has_checksum else "-"
+    #     #
+    #     #         return f"[b]Name:[/b] {fname}{spacing}[b]Size:[/b] {size}{spacing}[b]Hash:[/b] {hash}"
+    #     #     else:
+    #     #         return "File not existing here"
+    #
+    #     # if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
+    #     if x.a is not None:
+    #         icon_src = _make_suitable_icon(x.a)
+    #         src = x.a.relative_path
+    #         # src_details = _make_suitable_details(x.a)
+    #
+    #     # if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
+    #     if x.b is not None:
+    #         icon_dst = _make_suitable_icon(x.b)
+    #         dst = x.b.relative_path
+    #         # dst_details = _make_suitable_details(x.b)
+    #
+    #     if x.direction == ActionDirection.DST2SRC:
+    #         frm_src, frm_dest = frm_dest, frm_src
+    #     elif x.direction == ActionDirection.BOTH:
+    #         frm_src = frm_dest
+    #
+    #     src_column = Text.from_markup(f"{frm_src}{icon_src}{src}[/]")
+    #     dst_column = Text.from_markup(f"{frm_dest}{icon_dst}{dst}[/]")
+    #
+    #     src_column.overflow = dst_column.overflow = "ellipsis"
+    #     src_column.no_wrap = dst_column.no_wrap = True
+    #
+    #     central_column = Text.from_markup(f"{dir_frm}{direction}[/]", justify="center")
+    #
+    #     progress_update = x.get_update()
+    #
+    #     if (x.status == SyncStatus.SUCCESS):
+    #         central_column = Text.from_markup(":white_heavy_check_mark:", justify="center")
+    #     elif (x.status == SyncStatus.FAILED):
+    #         central_column = Text.from_markup(":cross_mark:", justify="center")
+    #     elif (x.status == SyncStatus.IN_PROGRESS) and (progress_update is not None):
+    #         central_column_size = this.ordered_columns[1].width
+    #         p = progress_update.progress / 100
+    #
+    #         central_column = Bar((0, central_column_size * p), highlight_style="green1", background_style="dark_green")
+    #
+    #     return (
+    #         src_column,
+    #         central_column,
+    #         dst_column
+    #     )
 
-        #if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
-        if x.a is not None:
-            icon_src = _make_suitable_icon(x.a)
-            src = x.a.relative_path
-            # src_details = _make_suitable_details(x.a)
-
-        #if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
-        if x.b is not None:
-            icon_dst = _make_suitable_icon(x.b)
-            dst = x.b.relative_path
-            # dst_details = _make_suitable_details(x.b)
-
-        if x.direction == ActionDirection.DST2SRC:
-            frm_src, frm_dest = frm_dest, frm_src
-        elif x.direction == ActionDirection.BOTH:
-            frm_src = frm_dest
-
-
-        src_column = Text.from_markup(f"{frm_src}{icon_src}{src}[/]")
-        dst_column = Text.from_markup(f"{frm_dest}{icon_dst}{dst}[/]")
-
-        src_column.overflow = dst_column.overflow = "ellipsis"
-        src_column.no_wrap = dst_column.no_wrap = True
-
-
-        central_column = Text.from_markup(f"{dir_frm}{direction}[/]", justify="center")
-
-        progress_update = x.get_update()
-
-        if (x.status == SyncStatus.SUCCESS):
-            central_column = Text.from_markup(":white_heavy_check_mark:", justify="center")
-        elif (x.status == SyncStatus.FAILED):
-            central_column = Text.from_markup(":cross_mark:", justify="center")
-        elif (x.status == SyncStatus.IN_PROGRESS) and (progress_update is not None):
-            central_column_size = this.ordered_columns[1].width
-            p = progress_update.progress/100
-
-            central_column = Bar((0,central_column_size*p),highlight_style="green1",background_style="dark_green")
-
-
-        return (
-            src_column,
-            central_column,
-            dst_column
-        )
-
-# TODO: add key bindings list for this widget
 class DisplayFilters(Widget):
 
-    def __init__(this, data_table: DirectoryComparisonDataTable,*args,**kwargs):
+    def __init__(this, data_table: DirectoryComparisonDataTable, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         this._data_table = data_table
 
         this._sub_widgets = {
-            "No action": Switch(id="df_no_action",value=True),
-            "Copy": Switch(id="df_copy",value=True),
-            "Delete": Switch(id="df_delete",value=True)
+            "No action": Switch(id="df_no_action", value=True),
+            "Copy": Switch(id="df_copy", value=True),
+            "Delete": Switch(id="df_delete", value=True)
         }
 
     def compose(this) -> ComposeResult:
         widgets = []
 
-        for lbl,switch in this._sub_widgets.items():
+        for lbl, switch in this._sub_widgets.items():
             widgets.append(Label(lbl))
             widgets.append(switch)
+
+        yield Horizontal(
+            Static("[bold]SPACE:[/bold] Cancel - "
+                   "[bold]RIGHT Key:[/bold] Move to destination - [bold]LEFT Key:[/bold] Move to source - "
+                   "[bold]DELETE[/bold] Delete file - [bold]EQUAL (=):[/bold] Apply changes to both sides (if applicable)")
+        )
 
         yield Horizontal(*widgets, id="display_filters")
 
     @on(Switch.Changed)
-    def on_changed(this, event:Switch.Changed) -> None:
+    def on_changed(this, event: Switch.Changed) -> None:
         if event.switch == this._sub_widgets["No action"]:
             this._data_table.show_no_action = event.value
         elif event.switch == this._sub_widgets["Copy"]:

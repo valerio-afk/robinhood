@@ -11,7 +11,8 @@ class ActionType(Enum):
     COPY:int=2
     UPDATE:int=3
     DELETE:int=4
-    UNKNOWN:int=5
+    MOVE:int=5
+    UNKNOWN:int=6
 
     @property
     def supports_both(this):

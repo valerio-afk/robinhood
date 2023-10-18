@@ -42,7 +42,7 @@ current_timezone = lambda: datetime.now().astimezone().tzinfo
 UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
 
 
-def _fix_isotime(time:str) -> str:
+def _fix_isotime(time: str) -> str:
     '''
     The ISO time returned by rclone (at least when tested on MEGA) returns a format that datetime doesn't like
     This function fixes these issues
@@ -142,8 +142,7 @@ class AbstractPath(ABC):
     PATH_SEPARATOR = '/'
     VOLUME_SEPARATOR = ":"
 
-
-    def __init__(this, path:str, root:Union[str|None]=None):
+    def __init__(this, path: str, root: Union[str | None] = None):
         '''
         Instantiate a new path
 
@@ -189,7 +188,7 @@ class AbstractPath(ABC):
         return suitable_class(path=".", root=path)
 
     @classmethod
-    def as_posix(cls, p:str) -> str:
+    def as_posix(cls, p: str) -> str:
         '''
         I gave this method a nice name, because replacing_the_stupid_windows_backslashes_with_normal_slashes sounded kinda bad.
         I think you know understand what it does
@@ -199,7 +198,7 @@ class AbstractPath(ABC):
         return p.replace("\\", "/")
 
     @classmethod
-    def join(cls, *args) -> Union[str|None]:
+    def join(cls, *args) -> Union[str | None]:
         '''
         Similar in concept as os.path.join
         :param args:
@@ -245,7 +244,7 @@ class AbstractPath(ABC):
         return (d == ".") or (d == "..")
 
     @classmethod
-    def is_absolute(cls, path:str) -> bool:
+    def is_absolute(cls, path: str) -> bool:
         """
         Check if the path is absolute. This method needs to be overridden for specific case, eg NT-like paths
         :param path: the path to check if it's absolute or not
@@ -254,7 +253,7 @@ class AbstractPath(ABC):
         return path.startswith(cls.PATH_SEPARATOR)
 
     @classmethod
-    def is_relative(cls, path:str) -> bool:
+    def is_relative(cls, path: str) -> bool:
         """
         Check if the path is relative.
         :param path: the path to check if it's absolute or not
@@ -263,7 +262,7 @@ class AbstractPath(ABC):
         return not cls.is_absolute(path)
 
     @classmethod
-    def normalise(cls, path:str) -> str:
+    def normalise(cls, path: str) -> str:
         """
         Normalise the path were appropriate. This method needs to be overridden for specific case
         :param path: the path to normalise
@@ -272,7 +271,7 @@ class AbstractPath(ABC):
         return cls.as_posix(path)
 
     @classmethod
-    def split(cls, path:str) -> List[str]:
+    def split(cls, path: str) -> List[str]:
         '''
         Split the path - opposite to the join method
         :param path: The path to split
@@ -359,7 +358,7 @@ class AbstractPath(ABC):
         if (this.is_absolute(this._path)):
             this._path = this.join(this._basepath, old_relpath)
 
-    def cd(this, path:str) -> None:
+    def cd(this, path: str) -> None:
         '''
         Change directory (similar to the cd command in any shell/terminal)
         :param path: The new (absolute/relative) path to navigate into
@@ -394,7 +393,7 @@ class AbstractPath(ABC):
         c.cd(path)
         return c
 
-    def is_under_root(this, path:str) -> bool:
+    def is_under_root(this, path: str) -> bool:
         '''
         Very similar to the `is_root_of` static method. This method implements the instance version of it
         :param path: The path to check if it's root of the current root path
@@ -416,6 +415,7 @@ class FileSystemObject:
     '''
     This class represents any suitable object in a file system (in our case, mainly regular files and directories)
     '''
+
     def __init__(this,
                  fullpath: Union[AbstractPath | None],
                  *,
@@ -481,11 +481,15 @@ class FileSystemObject:
         return not this.is_remote
 
     @property
-    def size(this) -> Union[int|None]:
+    def size(this) -> Union[int | None]:
         """
         Gets the file size
         :return: The size in bytes of the fs object. It's set by -1 if it's the size of a directory
         """
+
+        if not this.exists:
+            return None
+
         if (this._size is None) or (this._size < 0):
             this.update_information()
 
@@ -520,14 +524,13 @@ class FileSystemObject:
         this._mtime = mtime if (mtime is None) or (mtime.tzinfo is not None) else mtime.replace(
             tzinfo=current_timezone())
 
-
     @property
     def has_checksum(this) -> bool:
         return this._checksum is not None
 
     @property
     def checksum(this) -> str:
-        if this._checksum is None:
+        if not this.has_checksum:
             args = ["rclone", "hashsum", "md5", this.absolute_path]
 
             if this.is_remote:
@@ -539,6 +542,16 @@ class FileSystemObject:
                 this._checksum = output.stdout.decode().split(" ")[0]
 
         return this._checksum
+
+    @checksum.setter
+    def checksum(this, value: str) -> None:
+        """
+        This can be used in those cases the checksum has been precomputed
+
+        :param value: Precomputed checksum value
+        :return:
+        """
+        this._checksum = value
 
     def __eq__(this, other) -> bool:
         if type(other) == str:
@@ -578,7 +591,7 @@ class FileSystemObject:
         else:
             this._exists = False
 
-    def to_dict(this) -> Dict[str,Any]:
+    def to_dict(this) -> Dict[str, Any]:
         return {
             "path": this.relative_path,
             "type": this.type.value,
@@ -589,9 +602,8 @@ class FileSystemObject:
             "hidden": this.hidden
         }
 
-
     @classmethod
-    def from_dict(cls, d:Dict[str,Any],*,mtime:Union[int|None] = None) -> FileSystemObject:
+    def from_dict(cls, d: Dict[str, Any], *, mtime: Union[int | None] = None) -> FileSystemObject:
 
         d["mtime"] = mtime if d["mtime"] is None else d['mtime']
 
@@ -608,6 +620,7 @@ class PathException(Exception):
 
 class MissingAbsolutePathException(PathException):
     """An exception generated when an absolute path is missing"""
+
     def __init__(this, path, desc="Path"):
         super().__init__(f"{desc} {path} is not an absolute path.")
 
@@ -616,6 +629,7 @@ class PathOutsideRootException(PathException):
     """An exception raised when someone wants to go beyond the allowed boundaries of the file system
     (the root parameter in AbsolutePath) sets a boundary and no one can go above that.
     """
+
     def __init__(this, root, path):
         super().__init__(f"The path {path} is not rooted in {root}")
 
@@ -626,7 +640,8 @@ class PosixAbstractPath(AbstractPath):
     Most of the functionality needed for this class are in the parent class.
     It's required to adapt a few things to make it work with POSIX paths
     """
-    def __init__(this, path:str, root:Union[str|None]=None):
+
+    def __init__(this, path: str, root: Union[str | None] = None):
         bp = this.normalise(path if root is None else root)
         path = this.normalise(path)
 
@@ -639,7 +654,7 @@ class PosixAbstractPath(AbstractPath):
         super().__init__(path, bp)
 
     @classmethod
-    def normalise(cls, path:str) -> str:
+    def normalise(cls, path: str) -> str:
         path = super(PosixAbstractPath, PosixAbstractPath).normalise(path)
         tokens = cls.split(path)
 
@@ -675,8 +690,9 @@ class NTAbstractPath(AbstractPath):
     Some of the functionality needed for this class are in the parent class.
     It's required to adapt a few things to make it work with NT paths
     """
+
     @classmethod
-    def get_volume(cls, path:str) -> [str|None]:
+    def get_volume(cls, path: str) -> [str | None]:
         """
         Gets the volume from the path
         :param path: The path from where to get the volume of the drive
@@ -691,7 +707,7 @@ class NTAbstractPath(AbstractPath):
         return None
 
     @classmethod
-    def strip_volume(cls, path:str) -> str:
+    def strip_volume(cls, path: str) -> str:
         """
         Removes the volume from the given path
         :param path: The path to remove the volume from
@@ -775,9 +791,8 @@ class FileSystem(ABC):
         this._tree_cache: Any = []
 
         # File System Object cache
-        this._file_objects_cache:Dict[str,FileSystemObject] = {}
+        this._file_objects_cache: Dict[str, FileSystemObject] = {}
         this._previous_file_objects_cache: Dict[str, FileSystemObject] = {}
-
 
         # The path manager is a concerete subtype of AbstractPath that is specialised in managing paths in
         # specific environments/cases (e.g., POSIXPaths)
@@ -795,8 +810,6 @@ class FileSystem(ABC):
         This method needs to be implemented becaue each subclass can load and represents cache differently.
         """
         ...
-
-
 
     @abstractmethod
     def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
@@ -841,7 +854,7 @@ class FileSystem(ABC):
         :param fo: Updated information. If None, the entry in the cache will be removed
         """
 
-        if not AbstractPath.is_root_of(path.absolute_path,this.root):
+        if not AbstractPath.is_root_of(path.absolute_path, this.root):
             raise ValueError(f"{fo.absolute_path} is not rooted in this file system ({this.root})")
 
         p = path.relative_path
@@ -850,7 +863,6 @@ class FileSystem(ABC):
                 del this._file_objects_cache[p]
         else:
             this._file_objects_cache[p] = fo
-
 
     @property
     def cached(this) -> bool:
@@ -880,14 +892,11 @@ class FileSystem(ABC):
         """
         return this.current_path
 
-
     def __str__(this) -> str:
         return this.current_path
 
     def __repr__(this) -> str:
         return str(this)
-
-
 
     def _get_fso_from_cache(this, path: AbstractPath) -> Union[FileSystemObject | None]:
         """
@@ -904,12 +913,12 @@ class FileSystem(ABC):
         if not os.path.exists(cache_filename):
             return
 
-        with open(cache_filename,'r') as h:
+        with open(cache_filename, 'r') as h:
             d = json.load(h)
             if d['root'] != this.root:
                 return
 
-        files = d.setdefault('files',[])
+        files = d.setdefault('files', [])
 
         fsos = {}
 
@@ -919,12 +928,11 @@ class FileSystem(ABC):
 
             f['fullpath'] = this.new_path(p)
 
-            fsos[p] = FileSystemObject.from_dict(f,mtime=d['timestamp'])
+            fsos[p] = FileSystemObject.from_dict(f, mtime=d['timestamp'])
 
         this._previous_file_objects_cache = fsos
 
-
-    def get_previous_version(this,path:AbstractPath, match_fullpath=True) -> Union[FileSystemObject|None]:
+    def get_previous_version(this, path: AbstractPath, match_fullpath=True) -> Union[FileSystemObject | None]:
         """
         Finds a file system object inside the cache obtained from a previous run of the program
         :param path: Path of the file to check if it was previously found
@@ -938,7 +946,7 @@ class FileSystem(ABC):
         else:
             fname = AbstractPath.split(path.absolute_path)[-1]
 
-            for p,fso in this._previous_file_objects_cache.items():
+            for p, fso in this._previous_file_objects_cache.items():
                 if os.path.split(p)[-1] == fname:
                     return fso
 
@@ -957,7 +965,6 @@ class FileSystem(ABC):
             if (this._tree_cache is None) or (len(this._tree_cache) == 0):
                 if (not this.cached) or force:
                     this._load()
-
 
     def cd(this, path) -> None:
         """
@@ -979,8 +986,7 @@ class FileSystem(ABC):
         """
         return this._path.visit(path)
 
-
-    def walk(this, path:Union[AbstractPath | None] = None) -> Iterable[FileSystemObject]:
+    def walk(this, path: Union[AbstractPath | None] = None) -> Iterable[FileSystemObject]:
         '''
         Iterate over all files recusiverly from the path (if provided)
         :param path: The path to start walking from. If not specified, the current working  directory is used
@@ -1009,7 +1015,6 @@ class FileSystem(ABC):
         """
         return this._path_manager(path, root if root is not None else this.root)
 
-
     def flush_file_object_cache(this) -> None:
         """
         Flushes changes of the file system objects into cache
@@ -1018,27 +1023,34 @@ class FileSystem(ABC):
         if not this.cached or (this._file_objects_cache is None) or (len(this._file_objects_cache) == 0):
             return
 
-        keys = sorted(this._file_objects_cache.keys(),key=lambda path: (len(AbstractPath.split(path)), path))
+        # Some files in the previous cache can have some useful information to be imported (eg, md5 hash)
+        for path in this._previous_file_objects_cache:
+            current = this._previous_file_objects_cache[path]
+            previous = this.get_previous_version(current.fullpath)
+
+            if (previous is not None) and (current is not None):
+                if (previous.mtime.timestamp() == current.mtime.timestamp()) and \
+                        (previous.size == current.size) and \
+                        previous.has_checksum and (not current.has_checksum):
+                    current.checksum = previous.checksum
+
+        keys = sorted(this._file_objects_cache.keys(), key=lambda path: (len(AbstractPath.split(path)), path))
 
         fsos = [this._file_objects_cache[k].to_dict() for k in keys]
 
         cache_filename = get_cache_file(this.root)
 
-        parent,_ = os.path.split(cache_filename)
+        parent, _ = os.path.split(cache_filename)
 
         if not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
 
-        with open(cache_filename,"w") as h:
+        with open(cache_filename, "w") as h:
             json.dump({
                 "root": this.root,
-                "timestamp":datetime.now().timestamp(),
+                "timestamp": datetime.now().timestamp(),
                 "files": fsos
-                },h)
-
-
-
-
+            }, h)
 
 
 class LocalFileSystem(FileSystem):
@@ -1096,7 +1108,6 @@ class LocalFileSystem(FileSystem):
         # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
 
         return content
-
 
     def exists(this, filename):
         p = this.visit(filename)
