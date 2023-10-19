@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from filesystem import AbstractPath
 from rclone_python.rclone import copy, delete
 from platformdirs import site_cache_path
-from filesystem import convert_to_bytes, FileSystemObject, FileSystem
+from filesystem import convert_to_bytes, FileSystemObject, FileSystem, FileType
 from enums import ActionDirection, SyncStatus, ActionType
 from events import SyncEvent, RobinHoodBackend
 from fnmatch import fnmatch
@@ -263,16 +263,23 @@ class CopySyncAction(AbstractSyncAction):
             update = _parse_rclone_progress([this],this.direction,d)
             _trigger("on_synching", SyncEvent(update))
 
+
+        src_file = this.a
+
         x = this.a.absolute_path
         y = this.b.containing_directory
 
         if (this.direction == ActionDirection.DST2SRC):
+            src_file = this.b
             x = this.b.absolute_path
             y = this.a.containing_directory
 
-        this._status = SyncStatus.IN_PROGRESS
-        copy(x, y, show_progress=show_progress, listener=_update_internal_status, args=['--use-mmap', '--no-traverse'])
-        this._check_success()
+        if src_file.type == FileType.REGULAR:
+            this._status = SyncStatus.IN_PROGRESS
+            copy(x, y, show_progress=show_progress, listener=_update_internal_status, args=['--use-mmap', '--no-traverse'])
+            this._check_success()
+        else:
+            this.stats = SyncStatus.SUCCESS
 
     def _check_success(this) -> None:
         if this.status == SyncStatus.SUCCESS:
@@ -316,9 +323,11 @@ class DeleteSyncAction(AbstractSyncAction):
         _trigger = _get_trigger_fn(eventhandler)
 
         if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
-            delete(this.a.absolute_path)
+            if this.a.type == FileType.REGULAR:
+                delete(this.a.absolute_path)
         if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
-            delete(this.b.absolute_path)
+            if this.b.type == FileType.REGULAR:
+                delete(this.b.absolute_path)
 
         this._check_success()
 
@@ -331,6 +340,10 @@ class DeleteSyncAction(AbstractSyncAction):
 
         x = this.a
         y = this.b
+
+        if (x.type == FileType.DIR) or (y.type == FileType.DIR):
+            this._status = SyncStatus.SUCCESS
+            return
 
         x.update_information()
         y.update_information()
@@ -551,9 +564,11 @@ class SynchingManager():
     def sort(this,**kwargs) -> None:
         this._changes.sort(**kwargs)
 
+    #TODO: actions on directories must be put at the end
+    #TODO: to check the success of directories, add the concept of nested actions and check if them all are successfull
     def apply_changes(this, show_progress:bool=False, eventhandler: [SyncEvent | None] = None) -> None:
         for x in this._changes:
-            if x.status != SyncStatus.SUCCESS:
+            if (x.status != SyncStatus.SUCCESS):
                 x.apply_action(show_progress, eventhandler)
                 this.flush_action(x)
 
@@ -583,12 +598,32 @@ class SynchingManager():
                 side = this.destination if action.direction == ActionDirection.SRC2DST else this.source
                 fso = action.b if action.direction == ActionDirection.SRC2DST else action.a
 
-                side.set_file(fso.fullpath, fso)
+                if fso.type == FileType.REGULAR:
+                    side.set_file(fso.fullpath, fso)
             case ActionType.DELETE:
-                side = this.destination if action.direction == ActionDirection.SRC2DST else this.source
-                fso = action.b if action.direction == ActionDirection.SRC2DST else action.a
+                if (action.direction == ActionDirection.SRC2DST) or (action.direction == ActionDirection.BOTH):
+                    fso = action.b
+                    if fso.type == FileType.REGULAR:
+                        this.destination.set_file(fso.fullpath, None)
 
-                side.set_file(fso.fullpath, None)
+                if (action.direction == ActionDirection.DST2SRC) or (action.direction == ActionDirection.BOTH):
+                    fso = action.a
+                    if fso.type == FileType.REGULAR:
+                        this.source.set_file(fso.fullpath, None)
+
+
+    def get_nested_changes(this, action: AbstractSyncAction) -> List[AbstractSyncAction]:
+
+        if action.a.type != FileType.DIR:
+            return []
+
+        #TODO: Big fat bug over here! Need to better check this is_parent_of as everything is selected
+
+        actions = [ itm for itm in this._changes if ( (action.a.fullpath.is_parent_of(itm.a.absolute_path)) or
+                                                      (action.b.fullpath.is_parent_of(itm.b.absolute_path))) and
+                                                     itm != action]
+
+        return actions
 
     @classmethod
     def make_action(cls, source:FileSystemObject,
@@ -698,7 +733,8 @@ class BulkCopySynchingManager(SynchingManager):
         with open(path, "w") as handle:
             for x in this:
                 fso = x.a if this._direction == ActionDirection.SRC2DST else x.b
-                handle.write(f"{fso.relative_path}\n")
+                if fso.type == FileType.REGULAR:
+                    handle.write(f"{fso.relative_path}\n")
 
 
         a = this.source.root

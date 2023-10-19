@@ -171,7 +171,7 @@ class AbstractPath(ABC):
             this._path = path
 
         # If path is absolute, it needs to be clear whether it's under the provided root, otherwise nothing will work
-        if not this.is_under_root(this._path):
+        if not this.root_is_parent_of(this._path):
             raise PathOutsideRootException(this.absolute_path, this.root)
 
     @classmethod
@@ -285,7 +285,7 @@ class AbstractPath(ABC):
         return [t for t in tokens if len(t) > 0]
 
     @classmethod
-    def is_root_of(cls, path, root):
+    def is_root_of(cls, path:str, root:str) -> bool:
         if cls.is_relative(path):
             return True
 
@@ -366,7 +366,7 @@ class AbstractPath(ABC):
 
         # Firstly, we need to check if the new path is under the root of the current object
         # We cannot explore paths outside the root
-        if (this.is_under_root(path)):
+        if (this.root_is_parent_of(path)):
             # If the path is absolute, then it simply replaces the _path property
             if (this.is_absolute(path)):
                 this._path = this.normalise(path)
@@ -377,7 +377,7 @@ class AbstractPath(ABC):
                 # if the new path (after normalisation) is still under the root, we keep it
                 # otherwise, if we are above the root (this can happen with a lot of ../../../)
                 # we set the current path as root.
-                this._path = new_path if this.is_under_root(new_path) else this.root
+                this._path = new_path if this.root_is_parent_of(new_path) else this.root
         else:
             # In this case, the current path is the root (very similar to the above case)
             this._path = this.root
@@ -393,13 +393,22 @@ class AbstractPath(ABC):
         c.cd(path)
         return c
 
-    def is_under_root(this, path: str) -> bool:
+    def root_is_parent_of(this, path: str) -> bool:
         '''
         Very similar to the `is_root_of` static method. This method implements the instance version of it
-        :param path: The path to check if it's root of the current root path
+        :param path: The path to check if it's under root of the current root path
         :return: TRUE if the path is under the current root, FALSE otherwise
         '''
         return this.is_root_of(path, this.root)
+
+    def is_parent_of(this, path: str) -> bool:
+        '''
+        Very similar to the `is_parent_of_root` but considers parent directory as root
+        :param path: The path to check if it's under root of the current path
+        :return: TRUE if the path is under the current path, FALSE otherwise
+        '''
+
+        return this.is_root_of(path, this.absolute_path)
 
 
 class FileType(Enum):
@@ -420,8 +429,8 @@ class FileSystemObject:
                  fullpath: Union[AbstractPath | None],
                  *,
                  type: FileType,
-                 size: Union[int | None],
-                 mtime: Union[datetime | None],
+                 size: Union[int | None] = None,
+                 mtime: Union[datetime | None] = None,
                  exists: Union[bool | None] = None,
                  checksum: Union[str | None] = None,
                  hidden: bool = False):
@@ -487,7 +496,7 @@ class FileSystemObject:
         :return: The size in bytes of the fs object. It's set by -1 if it's the size of a directory
         """
 
-        if not this.exists:
+        if (not this.exists) or (this.type == FileType.DIR):
             return None
 
         if (this._size is None) or (this._size < 0):
@@ -529,7 +538,10 @@ class FileSystemObject:
         return this._checksum is not None
 
     @property
-    def checksum(this) -> str:
+    def checksum(this) -> Union[str | None]:
+        if this.type == FileType.DIR:
+            return None
+
         if not this.has_checksum:
             args = ["rclone", "hashsum", "md5", this.absolute_path]
 
@@ -673,7 +685,7 @@ class PosixAbstractPath(AbstractPath):
     def relative_path(this) -> str:
         path = this.absolute_path
 
-        if (this.is_under_root(path)):
+        if (this.root_is_parent_of(path)):
             relpath = path[len(this.root):]
             if (len(relpath) == 0):
                 relpath = "."
@@ -752,7 +764,7 @@ class NTAbstractPath(AbstractPath):
     @property
     def relative_path(this):
         path = this.absolute_path
-        if (this.is_under_root(path)):
+        if (this.root_is_parent_of(path)):
             path = path[len(this.root):]
             if (len(path) == 0):
                 return "."

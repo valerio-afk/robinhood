@@ -23,12 +23,13 @@
 from __future__ import annotations
 from typing import Union, List, Iterable, Callable, Dict, Tuple, Any
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
-from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine
+from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine, AbstractPath
 from file_filters import UnixPatternExpasionFilter, RemoveHiddenFileFilter, FilterSet, FileFilter
 from rclone_python.rclone import copy
 from config import RobinHoodProfile
-from synching import SynchingManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction
+from synching import SynchingManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
 from events import SyncEvent, RobinHoodBackend
+import os
 import subprocess
 import re
 import rclone_python
@@ -230,6 +231,10 @@ def compare_tree(src: Union[str | FileSystem],
     src.load()
     dest.load()
 
+    # define an  empty set of directories that will be needed below
+
+    directories = set('.')
+
     # Asks rclone to compute the differences betweeen those two directories
 
     rclone_command = ['rclone', 'check', src.root, dest.root, '--combined', '-', '--size-only']
@@ -241,6 +246,7 @@ def compare_tree(src: Union[str | FileSystem],
     sync_changes = SynchingManager(src , dest)
 
     files = report.stdout.decode().splitlines()
+
 
     # for each line in the stdout
     for i, line in enumerate(files):
@@ -273,6 +279,9 @@ def compare_tree(src: Union[str | FileSystem],
 
         past_source_object = src.get_previous_version(src_path)
         past_dest_object = dest.get_previous_version(dest_path)
+
+        # add directory to the set of directories
+        directories.add(os.path.split(src_path.relative_path)[0])
 
         # By default, it's assumed that the standard way to transfer files is from source -> destination
         # Specific cases are treated below
@@ -355,6 +364,15 @@ def compare_tree(src: Union[str | FileSystem],
         action = SynchingManager.make_action(source_object, dest_object, type=type, direction=direction)
         sync_changes.add_action(action)
 
+    # add directories information to the list of action
+    # not sure if these should also go in the file cache - not doing it at the moment
+
+    for directory in directories:
+        if len(directory) > 0:
+            a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
+            b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
+            sync_changes.add_action(NoSyncAction(a,b))
+
     # Flush file info to cache
     src.flush_file_object_cache()
     dest.flush_file_object_cache()
@@ -368,6 +386,12 @@ def compare_tree(src: Union[str | FileSystem],
             results_for_update(sync_changes)
         case SyncMode.MIRROR:
             results_for_mirror(sync_changes)
+
+    def _tree_sort_fn(x:FileSystemObject):
+        p = list(AbstractPath.split(x.a.absolute_path))
+        return p
+
+    sync_changes.sort(key=_tree_sort_fn)
 
     _trigger("after_comparing", SyncEvent(sync_changes))
 

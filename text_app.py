@@ -65,7 +65,13 @@ Column.percentage_width = None  # to overcome textual limitations :)
 
 
 def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
-    _make_suitable_icon = lambda x: ":page_facing_up:" if x.exists else ":white_medium_star:[i]"
+    #_make_suitable_icon = lambda x: ":page_facing_up:" if x.exists else ":white_medium_star:[i]"
+    def _make_suitable_icon(x:FileSystemObject):
+        file_type = ":page_facing_up:" if x.type == FileType.REGULAR else ":open_file_folder:"
+        new_file = "" if x.exists else ":white_medium_star:"
+
+        return file_type+new_file
+
 
     a = action.a
     b = action.b
@@ -207,15 +213,15 @@ class ComparisonSummary(Widget):
             if (action == ActionType.COPY) or (action == ActionType.UPDATE):
                 match r.direction:
                     case ActionDirection.SRC2DST:
-                        upload += r.a.size
+                        upload += r.a.size if r.a.type == FileType.REGULAR else 0
                     case ActionDirection.DST2SRC:
-                        download += r.b.size
+                        download += r.b.size if r.b.type == FileType.REGULAR else 0
 
             if (action == ActionType.DELETE):
                 if (r.direction == ActionDirection.DST2SRC) or (r.direction == ActionDirection.BOTH):
-                    delete_source += r.a.size
+                    delete_source += r.a.size if r.a.type == FileType.REGULAR else 0
                 if (r.direction == ActionDirection.SRC2DST) or (r.direction == ActionDirection.BOTH):
-                    delete_target += r.b.size
+                    delete_target += r.b.size if r.b.type == FileType.REGULAR else 0
 
         return (upload, download, delete_source, delete_target)
 
@@ -1016,14 +1022,12 @@ class DirectoryComparisonDataTable(DataTable):
         """
         return this._sync_manager
 
-    def show_results(this, changes: SynchingManager) -> None:
+    def show_results(this, changes: Union[SynchingManager | None]) -> None:
 
         if (changes is None):
             return None
 
         this._sync_manager = changes
-
-        this._sync_manager.sort(key=lambda x: (len(AbstractPath.split(x.a.absolute_path)), x.a.absolute_path))
 
         this.refresh_table()
 
@@ -1043,7 +1047,7 @@ class DirectoryComparisonDataTable(DataTable):
                     (this.show_delete and (itm.type == ActionType.DELETE)):
                 this._displayed_actions.append(itm)
 
-        rendered_rows = [None] * len(this._displayed_actions)
+        rendered_rows = [''] * len(this._displayed_actions)
 
         for i, x in enumerate(this._displayed_actions):
             rendered_rows[i] = this._render_row(x)
@@ -1091,11 +1095,31 @@ class DirectoryComparisonDataTable(DataTable):
         if (action is None):
             return
 
-        new_action = this._sync_manager.cancel_action(action)
+        actions = [action] + this._sync_manager.get_nested_changes(action)
 
-        this.update_action(action, new_action)
+        for itm in actions:
+            new_action = this._sync_manager.cancel_action(itm)
+            this.update_action(itm, new_action)
+
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
+
+    def _change_direction_to_action(this, action: AbstractSyncAction, new_direction:ActionDirection):
+        new_action = None
+
+        if action.type == ActionType.NOTHING:
+            # in the case the action is nothing, it makes an attempt to convert into copy/update
+            try:
+                new_action = CopySyncAction(action.a, action.b, direction=new_direction)
+            except SyncDirectionNotPermittedException:
+                ...  # it's already nothing - so nothing to do
+        elif action.direction != new_direction:
+            try:
+                action.swap_direction()
+            except SyncDirectionNotPermittedException:
+                new_action = this._sync_manager.cancel_action(action)
+
+        this.update_action(action, new_action)
 
     def action_change_direction(this, key: str) -> None:
         """
@@ -1110,21 +1134,12 @@ class DirectoryComparisonDataTable(DataTable):
         action = this._displayed_actions[this.cursor_row]
         new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
 
-        new_action = None
+        actions = [action] + this._sync_manager.get_nested_changes(action)
 
-        if action.type == ActionType.NOTHING:
-            # in the case the action is nothing, it makes an attempt to convert into copy/update
-            try:
-                new_action = CopySyncAction(action.a, action.b, direction=new_dir)
-            except SyncDirectionNotPermittedException:
-                ...  # it's already nothing - so nothing to do
-        elif action.direction != new_dir:
-            try:
-                action.swap_direction()
-            except SyncDirectionNotPermittedException:
-                new_action = this._sync_manager.cancel_action(action)
+        for itm in actions:
+            this._change_direction_to_action(itm, new_dir)
 
-        this.update_action(action, new_action)
+
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
 
@@ -1133,9 +1148,12 @@ class DirectoryComparisonDataTable(DataTable):
             return
 
         action = this._displayed_actions[this.cursor_row]
-        new_action = this._sync_manager.convert_to_delete(action)
+        actions = [action] + this._sync_manager.get_nested_changes(action)
 
-        this.update_action(action, new_action)
+        for itm in actions:
+            new_action = this._sync_manager.convert_to_delete(itm)
+            this.update_action(itm, new_action)
+
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
 
@@ -1146,15 +1164,18 @@ class DirectoryComparisonDataTable(DataTable):
         # get the action highlighted by the cursor - ie the one the user wants to change
         action = this._displayed_actions[this.cursor_row]
 
-        try:
+        actions = [action] + this._sync_manager.get_nested_changes(action)
 
-            action.apply_both_sides()
+        for itm in actions:
+            try:
 
-            this.update_action(action)
-            this.app.query_one("#summary").refresh()
-            this.app._update_job_related_interface()
-        except (SyncDirectionNotPermittedException, FileNotFoundError):
-            ...
+                itm.apply_both_sides()
+
+                this.update_action(itm)
+                this.app.query_one("#summary").refresh()
+                this.app._update_job_related_interface()
+            except (SyncDirectionNotPermittedException, FileNotFoundError):
+                ...
 
     def _render_row(this, action:AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
         c1, c2, c3 = _render_row(action, this.ordered_columns[1].width)
