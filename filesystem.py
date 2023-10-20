@@ -524,6 +524,16 @@ class FileSystemObject:
 
         return this._mtime
 
+    @property
+    def is_empty(this) -> bool:
+        if this.type != FileType.DIR:
+            raise TypeError("Cannot determine the emptiness of something that is not a directory")
+
+        p = subprocess.run(['rclone', 'ls', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = p.stdout.decode().strip()
+
+        return (p.returncode == 0) and (len(output) == 0)
+
     @mtime.setter
     def mtime(this, mtime: Union[datetime | None]) -> None:
         """

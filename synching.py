@@ -130,6 +130,8 @@ class AbstractSyncAction(ABC):
         this._direction = direction
         this._status = SyncStatus.NOT_STARTED
         this._update = None
+        this._parent_action = None
+        this._nested_actions = set()
 
         this._validate_action_direction()
 
@@ -163,6 +165,18 @@ class AbstractSyncAction(ABC):
     def update(this, value):
         this._update = value
 
+    @property
+    def parent_action(this):
+        return this._parent_action
+
+    @parent_action.setter
+    def parent_action(this, parent: AbstractSyncAction):
+        this._parent_action = parent
+
+    @property
+    def nested_actions(this) -> Iterable[AbstractSyncAction]:
+        return iter(this._nested_actions)
+
     @abstractmethod
     def apply_action(this, show_progress=False, eventhandler: [SyncEvent | None] = None) -> None:
         ...
@@ -183,6 +197,37 @@ class AbstractSyncAction(ABC):
 
         if this.direction == ActionDirection.BOTH and not this.type.supports_both:
             raise SyncDirectionNotPermittedException("The provided action type does not support bidirectional changes")
+
+    def copy_related_actions(this, x: AbstractSyncAction):
+        this.parent_action = x.parent_action
+        this.add_nested_actions(x.get_nested_actions())
+
+
+    def add_nested_action(this, action:AbstractSyncAction) -> None:
+        this._nested_actions.add(action)
+
+    def add_nested_actions(this, actions:Iterable[AbstractSyncAction]) -> None:
+        this._nested_actions = this._nested_actions.union(set(actions))
+
+        for x in this.nested_actions:
+            x.parent_action = this
+
+    def delete_nested_action(this, action:AbstractSyncAction) -> None:
+        this._nested_actions.remove(action)
+
+    def delete_nested_actions(this, actions:Iterable[AbstractSyncAction]) -> None:
+        for x in actions:
+            this.delete_nested_action(x)
+
+    def clean_nested_actions(this) -> None:
+        this._nested_actions = set()
+
+    def replace_nested_actions(this, actions:Iterable[AbstractSyncAction]) -> None:
+        this.clean_nested_actions()
+        this.add_nested_actions(actions)
+
+    def get_nested_actions(this) -> List[AbstractSyncAction]:
+        return list(this._nested_actions)
 
     def swap_direction(this) -> None:
         new_dir = ActionDirection.SRC2DST if this.direction == ActionDirection.DST2SRC else ActionDirection.DST2SRC
@@ -368,106 +413,6 @@ class DeleteSyncAction(AbstractSyncAction):
         this._direction = new_dir
 
 
-# class SyncAction(AbstractSyncAction):
-#     def __init__(this,
-#                  a: FileSystemObject,
-#                  b: FileSystemObject,
-#                  type: ActionType = ActionType.NOTHING,
-#                  direction: Union[ActionDirection | None] = None,
-#                  timeout=60
-#                  ):
-#
-#         super().__init__(a=a, b=b, type=type, direction=direction)
-#
-#
-#
-#
-#
-#
-#     def __action_type_str(this) -> str:
-#         match (this.type):
-#             case ActionType.NOTHING:
-#                 return '-'
-#             # case ActionType.MKDIR:
-#             #     return 'D'
-#             case ActionType.COPY:
-#                 return '*'
-#             case ActionType.UPDATE:
-#                 return '+'
-#             case ActionType.DELETE:
-#                 return 'x'
-#
-#
-#
-#     def __repr__(this) -> str:
-#         return str(this)
-#
-#
-#
-#     def apply_action(this, show_progress=False, eventhandler: [SyncEvent | None] = None) -> None:
-#         _trigger = _get_trigger_fn(eventhandler)
-#
-#         def _update_internal_status(d: Dict):
-#             update = _parse_rclone_progress([this],this.direction,d)
-#             _trigger("on_synching", SyncEvent(update))
-#
-#         match this.type:
-#             case ActionType.DELETE:
-#                 try:
-#                     #p = this.b if this.direction == ActionDirection.SRC2DST else this.a
-#                     #delete(p.absolute_path)
-#                     if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
-#                         delete(this.a.absolute_path)
-#                     if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
-#                         delete(this.b.absolute_path)
-#
-#                 except Exception:
-#                     this._status = SyncStatus.FAILED
-#             case ActionType.UPDATE | ActionType.COPY:
-#                 x = this.a.absolute_path
-#                 y = this.b.containing_directory
-#
-#                 if (this.direction == ActionDirection.DST2SRC):
-#                     x = this.b.absolute_path
-#                     y = this.a.containing_directory
-#
-#                 this._status = SyncStatus.IN_PROGRESS
-#                 copy(x, y, show_progress=show_progress, listener=_update_internal_status, args=['--use-mmap', '--no-traverse'])
-#
-#         this._check_success()
-#
-#         _trigger("on_synching", SyncEvent(this))
-#
-#     def _check_success(this) -> None:
-#
-#         if this.type == ActionType.NOTHING:
-#             success = True
-#         else:
-#             x = this.a
-#             y = this.b
-#
-#             x.update_information()
-#             y.update_information()
-#
-#             if (this.direction == ActionDirection.DST2SRC):
-#                 x, y = y, x
-#
-#             match this.type:
-#                 # case ActionType.MKDIR:
-#                 #     success = y.exists
-#                 case ActionType.UPDATE | ActionType.COPY:
-#                     success = y.exists and (x.size == y.size)
-#                 case ActionType.DELETE:
-#                     success = not y.exists
-#                     if this.direction == ActionDirection.BOTH:
-#                         success = success and (not x. exists)
-#                 case _:
-#                     success = True
-#
-#         this._status = SyncStatus.SUCCESS if success else SyncStatus.FAILED
-
-
-
 class SynchingManager():
     """
     This class manages the application of each action between source and destination directories
@@ -530,6 +475,10 @@ class SynchingManager():
 
         new_action = NoSyncAction(action.a, action.b)
 
+        new_action.parent_action = action.parent_action
+        new_action.add_nested_actions( this.get_nested_changes(action) )
+
+
         if in_place:
             this.replace(action,new_action)
 
@@ -548,6 +497,9 @@ class SynchingManager():
         except SyncDirectionNotPermittedException:
             # attempted one direction - if the other fails, the exception will be escalated
             new_action = SynchingManager.make_action(action.a,action.b,type=ActionType.DELETE,direction=opposite_dir)
+
+        new_action.parent_action = action.parent_action
+        new_action.add_nested_actions(this.get_nested_changes(action))
 
         if in_place:
             this.replace(action, new_action)
@@ -641,13 +593,19 @@ class SynchingManager():
             case _:
                 raise NotImplementedError("Not yet mate!")
 
-    @classmethod
-    def convert_action(cls,action: AbstractSyncAction, type:ActionType) -> AbstractSyncAction:
 
-        if action.type == ActionType.NOTHING:
-            return SynchingManager.make_action(action.a, action.b,type=type, direction=ActionDirection.SRC2DST)
-        else:
-            return SynchingManager.make_action(action.a, action.b, type=type, direction=action.direction)
+    # @classmethod
+    # def convert_action(cls,action: AbstractSyncAction, type:ActionType) -> AbstractSyncAction:
+    #
+    #     if action.type == ActionType.NOTHING:
+    #         x = SynchingManager.make_action(action.a, action.b,type=type, direction=ActionDirection.SRC2DST)
+    #     else:
+    #         x = SynchingManager.make_action(action.a, action.b, type=type, direction=action.direction)
+    #
+    #     x.parent_action = action.parent_action
+    #     x.add_nested_actions(action.get_nested_action())
+    #
+    #     return x
 
 
 

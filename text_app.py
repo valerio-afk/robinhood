@@ -30,8 +30,8 @@ from textual.suggester import Suggester
 from textual.worker import get_current_worker
 from textual.containers import Container, Horizontal, Vertical
 from textual.events import DescendantBlur
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar, TextArea, \
-    Switch
+from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
+from textual.widgets import TextArea,Switch
 from textual.widgets.data_table import Column
 from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
@@ -63,6 +63,70 @@ SyncMethods: List[Tuple[str, SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x)
 
 Column.percentage_width = None  # to overcome textual limitations :)
 
+#TODO: it works. needs to be improved recursively
+def _get_new_parent(sync:SynchingManager, x : AbstractSyncAction) -> AbstractSyncAction:
+    """
+    match homogeneity of nested actions
+    :param sync:
+    :param x:
+    :return:
+    """
+    parent = x.parent_action
+
+    if parent is None:
+        return parent
+
+    types = []
+    direction = []
+
+    # need to get the new ones because the action passed as parameter has likely changed
+    # and not in the nested actions of the parent anymore
+
+    nested_actions = sync.get_nested_changes(parent)
+
+    for x in nested_actions:
+        types.append(x.type)
+        direction.append(x.direction)
+
+    if len(types) == 0:
+        return parent
+
+    # this is the default
+    parent_new_action = ActionType.NOTHING
+    new_parent_direction = None
+
+    #all_equal3 suggestion taken from https://stackoverflow.com/questions/3844801/check-if-all-elements-in-a-list-are-identical
+    #we must make sure that all types & directions are the same
+    if (types[1:] == types[:-1]) and (direction[1:] == direction[:-1]):
+        parent_new_action = types.pop()
+        new_parent_direction = direction.pop()
+
+    # I distinguish 3 cases
+    # Case 1: both action and direction (if applicable) are compatible with the current parent - do nothing
+    # Case 2: action is the same, but direction not -> swap action/apply both
+    # Case 3: neither action nor direction are the same - change action and revert on sync manager
+
+    #case 1
+    if parent.type == parent_new_action:
+        # we don't need to match directions if the action is nothing - it says as is
+        if parent_new_action != ActionType.NOTHING:
+            #case 2
+            if new_parent_direction == ActionDirection.BOTH:
+                parent.apply_both_sides()
+            else:
+                parent.swap_direction()
+
+    else: #case 3
+        new_action = SynchingManager.make_action(parent.a, parent.b, parent_new_action, new_parent_direction)
+        new_action.parent_action = parent.parent_action
+        new_action.add_nested_actions(nested_actions)
+
+        return new_action
+
+    parent.replace_nested_actions(nested_actions)
+
+    return parent
+
 
 def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
     #_make_suitable_icon = lambda x: ":page_facing_up:" if x.exists else ":white_medium_star:[i]"
@@ -71,6 +135,12 @@ def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, Renderab
         new_file = "" if x.exists else ":white_medium_star:"
 
         return file_type+new_file
+
+    def _compress_path(x: FileSystemObject):
+        fname = x.filename
+        spaces = "  " * x.relative_path.count(AbstractPath.PATH_SEPARATOR)
+
+        return spaces+_make_suitable_icon(x)+fname
 
 
     a = action.a
@@ -84,7 +154,9 @@ def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, Renderab
         case _:
             middle_column = "-" if action.direction is None else action.direction.value
 
-    return _make_suitable_icon(a) + a.relative_path, middle_column, _make_suitable_icon(b) + b.relative_path
+
+
+    return _compress_path(a),middle_column,_compress_path(b)
 
 
 def _render_action_as_no_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
@@ -1095,11 +1167,20 @@ class DirectoryComparisonDataTable(DataTable):
         if (action is None):
             return
 
-        actions = [action] + this._sync_manager.get_nested_changes(action)
+        actions = action.get_nested_actions() + [action]
+
+        new_action = None
 
         for itm in actions:
             new_action = this._sync_manager.cancel_action(itm)
             this.update_action(itm, new_action)
+
+        if len(actions)==1:
+            old_parent = new_action.parent_action
+            new_parent = _get_new_parent(this._sync_manager, new_action)
+            this.update_action(old_parent, new_parent)
+
+
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1119,6 +1200,9 @@ class DirectoryComparisonDataTable(DataTable):
             except SyncDirectionNotPermittedException:
                 new_action = this._sync_manager.cancel_action(action)
 
+        if new_action is not None:
+            new_action.add_nested_actions(this._sync_manager.get_nested_changes(action))
+
         this.update_action(action, new_action)
 
     def action_change_direction(this, key: str) -> None:
@@ -1134,10 +1218,15 @@ class DirectoryComparisonDataTable(DataTable):
         action = this._displayed_actions[this.cursor_row]
         new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
 
-        actions = [action] + this._sync_manager.get_nested_changes(action)
+        actions = action.get_nested_actions() + [action]
 
         for itm in actions:
             this._change_direction_to_action(itm, new_dir)
+
+        if len(actions)==1:
+            old_parent = actions[0].parent_action
+            new_parent = _get_new_parent(this._sync_manager, actions[0])
+            this.update_action(old_parent, new_parent)
 
 
         this.app.query_one("#summary").refresh()
@@ -1148,11 +1237,18 @@ class DirectoryComparisonDataTable(DataTable):
             return
 
         action = this._displayed_actions[this.cursor_row]
-        actions = [action] + this._sync_manager.get_nested_changes(action)
+        actions = action.get_nested_actions() + [action]
+
+        new_action = None
 
         for itm in actions:
             new_action = this._sync_manager.convert_to_delete(itm)
             this.update_action(itm, new_action)
+
+        if len(actions)==1:
+            old_parent = new_action.parent_action
+            new_parent = _get_new_parent(this._sync_manager, new_action)
+            this.update_action(old_parent, new_parent)
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1164,7 +1260,7 @@ class DirectoryComparisonDataTable(DataTable):
         # get the action highlighted by the cursor - ie the one the user wants to change
         action = this._displayed_actions[this.cursor_row]
 
-        actions = [action] + this._sync_manager.get_nested_changes(action)
+        actions = [action] + action.get_nested_actions()
 
         for itm in actions:
             try:
@@ -1176,6 +1272,11 @@ class DirectoryComparisonDataTable(DataTable):
                 this.app._update_job_related_interface()
             except (SyncDirectionNotPermittedException, FileNotFoundError):
                 ...
+
+        if len(actions)==1:
+            old_parent = actions[0].parent_action
+            new_parent = _get_new_parent(this._sync_manager, actions[0])
+            this.update_action(old_parent, new_parent)
 
     def _render_row(this, action:AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
         c1, c2, c3 = _render_row(action, this.ordered_columns[1].width)
@@ -1194,100 +1295,6 @@ class DirectoryComparisonDataTable(DataTable):
         c1.no_wrap = c2.no_wrap = True
 
         return c1,c2,c3
-
-    # def _render_row(this, x: AbstractSyncAction):
-    #     match x.type:
-    #         # case ActionType.MKDIR | ActionType.COPY:
-    #         case ActionType.COPY:
-    #             dir_frm = frm_src = frm_dest = "[green]"
-    #         case ActionType.UPDATE:
-    #             dir_frm = frm_src = frm_dest = "[bright_green]"
-    #         case ActionType.DELETE:
-    #             frm_src = '[magenta]'
-    #             frm_dest = '[s magenta]'
-    #             dir_frm = "[magenta]"
-    #         case ActionType.UNKNOWN:
-    #             dir_frm = frm_src = frm_dest = "[yellow]"
-    #
-    #         case _:
-    #             dir_frm = frm_src = frm_dest = "[grey]"
-    #
-    #     match x.type:
-    #         case ActionType.NOTHING:
-    #             direction = "-"
-    #         case ActionType.UNKNOWN:
-    #             direction = "?"
-    #         case _:
-    #             direction = x.direction.value
-    #
-    #     src = ""
-    #     dst = ""
-    #
-    #     # src_details = ""
-    #     # dst_details = ""
-    #
-    #     icon_src = ""
-    #     icon_dst = ""
-    #
-    #     def _make_suitable_icon(x: FileSystemObject):
-    #         if x.exists:
-    #             return ":open_file_folder:" if x.type == FileType.DIR else ":page_facing_up:"
-    #         else:
-    #             return ":white_medium_star:[i]"
-    #
-    #     # def _make_suitable_details(x:FileSystemObject):
-    #     #     spacing = " " * 3
-    #     #     if x.exists:
-    #     #         fname = x.filename
-    #     #         size = sizeof_fmt(x.size) if x.size is not None else "-"
-    #     #         hash = x.checksum if x.has_checksum else "-"
-    #     #
-    #     #         return f"[b]Name:[/b] {fname}{spacing}[b]Size:[/b] {size}{spacing}[b]Hash:[/b] {hash}"
-    #     #     else:
-    #     #         return "File not existing here"
-    #
-    #     # if (x.action_type == ActionType.NOTHING ) or ((x.a is not None) and (x.direction==ActionDirection.SRC2DST) ):
-    #     if x.a is not None:
-    #         icon_src = _make_suitable_icon(x.a)
-    #         src = x.a.relative_path
-    #         # src_details = _make_suitable_details(x.a)
-    #
-    #     # if (x.action_type == ActionType.NOTHING ) or ((x.b is not None) and (x.direction==ActionDirection.DST2SRC) ):
-    #     if x.b is not None:
-    #         icon_dst = _make_suitable_icon(x.b)
-    #         dst = x.b.relative_path
-    #         # dst_details = _make_suitable_details(x.b)
-    #
-    #     if x.direction == ActionDirection.DST2SRC:
-    #         frm_src, frm_dest = frm_dest, frm_src
-    #     elif x.direction == ActionDirection.BOTH:
-    #         frm_src = frm_dest
-    #
-    #     src_column = Text.from_markup(f"{frm_src}{icon_src}{src}[/]")
-    #     dst_column = Text.from_markup(f"{frm_dest}{icon_dst}{dst}[/]")
-    #
-    #     src_column.overflow = dst_column.overflow = "ellipsis"
-    #     src_column.no_wrap = dst_column.no_wrap = True
-    #
-    #     central_column = Text.from_markup(f"{dir_frm}{direction}[/]", justify="center")
-    #
-    #     progress_update = x.get_update()
-    #
-    #     if (x.status == SyncStatus.SUCCESS):
-    #         central_column = Text.from_markup(":white_heavy_check_mark:", justify="center")
-    #     elif (x.status == SyncStatus.FAILED):
-    #         central_column = Text.from_markup(":cross_mark:", justify="center")
-    #     elif (x.status == SyncStatus.IN_PROGRESS) and (progress_update is not None):
-    #         central_column_size = this.ordered_columns[1].width
-    #         p = progress_update.progress / 100
-    #
-    #         central_column = Bar((0, central_column_size * p), highlight_style="green1", background_style="dark_green")
-    #
-    #     return (
-    #         src_column,
-    #         central_column,
-    #         dst_column
-    #     )
 
 class DisplayFilters(Widget):
 

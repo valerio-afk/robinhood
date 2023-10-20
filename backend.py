@@ -233,7 +233,7 @@ def compare_tree(src: Union[str | FileSystem],
 
     # define an  empty set of directories that will be needed below
 
-    directories = set('.')
+    directories = set()
 
     # Asks rclone to compute the differences betweeen those two directories
 
@@ -364,6 +364,19 @@ def compare_tree(src: Union[str | FileSystem],
         action = SynchingManager.make_action(source_object, dest_object, type=type, direction=direction)
         sync_changes.add_action(action)
 
+    def _tree_sort_fn(x:[AbstractSyncAction|str]) -> Tuple[str,...]:
+        """
+        This nested function is to support the fullpath sorting, having longer paths to the end
+        It is used in the `key` parameter of sorting functions
+        :param x: The item to be sorted
+        :return: A tuple containing the path split by its components
+        """
+        path = x if isinstance(x,str) else x.a.absolute_path
+        p = AbstractPath.split(path)
+        return p
+
+    directories = sorted(directories,key=_tree_sort_fn, reverse=True)
+
     # add directories information to the list of action
     # not sure if these should also go in the file cache - not doing it at the moment
 
@@ -371,7 +384,12 @@ def compare_tree(src: Union[str | FileSystem],
         if len(directory) > 0:
             a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
             b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
-            sync_changes.add_action(NoSyncAction(a,b))
+
+            action = NoSyncAction(a,b)
+
+            action.add_nested_actions( sync_changes.get_nested_changes(action))
+
+            sync_changes.add_action(action)
 
     # Flush file info to cache
     src.flush_file_object_cache()
@@ -387,9 +405,7 @@ def compare_tree(src: Union[str | FileSystem],
         case SyncMode.MIRROR:
             results_for_mirror(sync_changes)
 
-    def _tree_sort_fn(x:FileSystemObject):
-        p = list(AbstractPath.split(x.a.absolute_path))
-        return p
+
 
     sync_changes.sort(key=_tree_sort_fn)
 
