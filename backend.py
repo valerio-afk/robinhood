@@ -28,6 +28,7 @@ from file_filters import UnixPatternExpasionFilter, RemoveHiddenFileFilter, Filt
 from rclone_python.rclone import copy
 from config import RobinHoodProfile
 from synching import SynchingManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
+from synching import CopySyncAction, DeleteSyncAction
 from events import SyncEvent, RobinHoodBackend
 import os
 import subprocess
@@ -387,9 +388,14 @@ def compare_tree(src: Union[str | FileSystem],
 
             action = NoSyncAction(a,b)
 
-            action.add_nested_actions( sync_changes.get_nested_changes(action))
+            action.set_nested_actions( sync_changes.get_nested_changes(action))
+            parent_key = sync_changes.add_action(action)
 
-            sync_changes.add_action(action)
+            parent_view = SynchingManager.SyncManagerView(sync_changes, [parent_key])
+
+
+            for child in action.get_nested_actions():
+                child.parent_action = parent_view
 
     # Flush file info to cache
     src.flush_file_object_cache()
@@ -498,42 +504,39 @@ def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
 
         actions_to_remove = []
 
-        for x in changes:
+        for i,x in changes:
             if filter_set.filter(x.a) or filter_set.filter(x.b):
-                actions_to_remove.append(x)
+                actions_to_remove.append(i)
 
-        for x in actions_to_remove:
-            changes.remove_action(x)
+        for idx in actions_to_remove:
+            changes.remove_action(idx)
 
 
-def results_for_update(results: SynchingManager) -> None:
-    for action in results:
+def results_for_update(sync_manager: SynchingManager) -> None:
+    for _,action in sync_manager:
         src = action.a
         dest = action.b
 
         if action.direction == ActionDirection.DST2SRC:
-            action.type = ActionType.NOTHING
-            action.direction = None
+            # action.type = ActionType.NOTHING
+            # action.direction = None
+            sync_manager.cancel_action(action,in_place=True)
         elif (src is not None) and (dest is not None):
             if (action.type == ActionType.NOTHING):
                 if (src.size != dest.size):
                     src_mtime = src.mtime
                     dest_mtime = dest.mtime
                     if src_mtime.timestamp() > dest_mtime.timestamp():
-                        action.direction = ActionDirection.SRC2DST
-                        action.type = ActionType.UPDATE
-                        #
-                        # match src.type:
-                        #     case FileType.REGULAR:
-                        #
-                        #     case FileType.DIR:
-                        #         action.action_type = ActionType.MKDIR
-                    else:
-                        action.type = ActionType.UNKNOWN
+                        new_action = CopySyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
+                        sync_manager.replace(action, new_action)
+                    #     action.direction = ActionDirection.SRC2DST
+                    #     action.type = ActionType.UPDATE
+                    # else:
+                    #     action.type = ActionType.UNKNOWN
 
 
-def results_for_mirror(results: SynchingManager) -> None:
-    for action in results:
+def results_for_mirror(sync_manager: SynchingManager) -> None:
+    for _,action in sync_manager:
         src = action.a
         dest = action.b
 
@@ -541,16 +544,17 @@ def results_for_mirror(results: SynchingManager) -> None:
             if (src.size != dest.size):
                 action.direction = ActionDirection.SRC2DST
 
-                if (not src.exists):
-                    action.type = ActionType.DELETE
-                else:
-                    action.type = ActionType.UPDATE
-                    # match src.type:
-                    #     case FileType.REGULAR:
-                    #
-                    #     case FileType.DIR:
-                    #         action.action_type = ActionType.MKDIR
+                new_action = None
 
+                if (not src.exists) and (action.type != ActionType.DELETE):
+                    new_action = DeleteSyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
+                elif action.type not in [ActionType.COPY, ActionType.UPDATE]:
+                    new_action = CopySyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
+                else:
+                    action.swap_direction()
+
+                if new_action is not None:
+                    sync_manager.replace(action, new_action)
 
 
 def kill_all_subprocesses():

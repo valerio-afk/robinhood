@@ -43,6 +43,7 @@ from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine, sizeof_fmt
 from datetime import datetime
 from config import RobinHoodConfiguration, RobinHoodProfile
+import re
 
 _SyncMethodsPrefix: Dict[SyncMode, str] = {
     SyncMode.UPDATE: ">>",
@@ -64,68 +65,78 @@ SyncMethods: List[Tuple[str, SyncMode]] = [(_SyncMethodsPrefix[x] + " " + str(x)
 Column.percentage_width = None  # to overcome textual limitations :)
 
 #TODO: it works. needs to be improved recursively
-def _get_new_parent(sync:SynchingManager, x : AbstractSyncAction) -> AbstractSyncAction:
+def _get_new_parent(sync:SynchingManager, x : AbstractSyncAction) -> List[Tuple[AbstractSyncAction,AbstractSyncAction]]:
     """
     match homogeneity of nested actions
     :param sync:
     :param x:
     :return:
     """
-    parent = x.parent_action
+    parents = x.parents
 
-    if parent is None:
-        return parent
+    new_parents = []
 
-    types = []
-    direction = []
 
-    # need to get the new ones because the action passed as parameter has likely changed
-    # and not in the nested actions of the parent anymore
+    for parent in parents:
 
-    nested_actions = sync.get_nested_changes(parent)
+        types = []
+        direction = []
 
-    for x in nested_actions:
-        types.append(x.type)
-        direction.append(x.direction)
+        # need to get the new ones because the action passed as parameter has likely changed
+        # and not in the nested actions of the parent anymore
 
-    if len(types) == 0:
-        return parent
+        nested_actions = list(sync.get_nested_changes(parent, levels=None))
 
-    # this is the default
-    parent_new_action = ActionType.NOTHING
-    new_parent_direction = None
+        # I need to replace the new_parents that are not yet been replaced in the sync manager
+        for old, new in new_parents:
+            try:
+                idx = nested_actions.index(old)
+                nested_actions[idx] = new
+            except ValueError:
+                ... # the old action is not in the list - not the end of the world
 
-    #all_equal3 suggestion taken from https://stackoverflow.com/questions/3844801/check-if-all-elements-in-a-list-are-identical
-    #we must make sure that all types & directions are the same
-    if (types[1:] == types[:-1]) and (direction[1:] == direction[:-1]):
-        parent_new_action = types.pop()
-        new_parent_direction = direction.pop()
+        for x in nested_actions:
+            types.append(x.type)
+            direction.append(x.direction)
 
-    # I distinguish 3 cases
-    # Case 1: both action and direction (if applicable) are compatible with the current parent - do nothing
-    # Case 2: action is the same, but direction not -> swap action/apply both
-    # Case 3: neither action nor direction are the same - change action and revert on sync manager
+        if len(types) > 0:
+            # this is the default
+            parent_new_action = ActionType.NOTHING
+            new_parent_direction = None
 
-    #case 1
-    if parent.type == parent_new_action:
-        # we don't need to match directions if the action is nothing - it says as is
-        if parent_new_action != ActionType.NOTHING:
-            #case 2
-            if new_parent_direction == ActionDirection.BOTH:
-                parent.apply_both_sides()
-            else:
-                parent.swap_direction()
+            #all_equal3 suggestion taken from https://stackoverflow.com/questions/3844801/check-if-all-elements-in-a-list-are-identical
+            #we must make sure that all types & directions are the same
+            if (types[1:] == types[:-1]) and (direction[1:] == direction[:-1]):
+                parent_new_action = types.pop()
+                new_parent_direction = direction.pop()
 
-    else: #case 3
-        new_action = SynchingManager.make_action(parent.a, parent.b, parent_new_action, new_parent_direction)
-        new_action.parent_action = parent.parent_action
-        new_action.add_nested_actions(nested_actions)
+            # I distinguish 3 cases
+            # Case 1: both action and direction (if applicable) are compatible with the current parent - do nothing
+            # Case 2: action is the same, but direction not -> swap action/apply both
+            # Case 3: neither action nor direction are the same - change action and revert on sync manager
 
-        return new_action
+            direct_descentant = parent.get_nested_actions()
 
-    parent.replace_nested_actions(nested_actions)
+            #case 1
+            if parent.type == parent_new_action:
+                # we don't need to match directions if the action is nothing - it says as is
+                if parent_new_action != ActionType.NOTHING:
+                    #case 2
+                    if new_parent_direction == ActionDirection.BOTH:
+                        parent.apply_both_sides()
+                    else:
+                        parent.swap_direction()
 
-    return parent
+            else: #case 3
+                new_action = SynchingManager.make_action(parent.a, parent.b, parent_new_action, new_parent_direction)
+                new_action.parent_action = parent.parent_action_view
+                new_action.set_nested_actions(direct_descentant)
+
+                new_parents.append((parent, new_action))
+
+            #parent.set_nested_actions(direct_descentant)
+
+    return new_parents
 
 
 def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
@@ -192,10 +203,12 @@ def _render_action_as_delete_action(action: AbstractSyncAction) -> Tuple[Rendera
 
     colour = "[red]"
 
+    _add_after_spaces = lambda x,s : re.sub("^(\s*)(.+)",f"\\1{s}\\2",x)
+
     if (action.direction == ActionDirection.SRC2DST) or (action.direction == ActionDirection.BOTH):
-        c3 = f"[s]{c3}"
+        c3 = _add_after_spaces(c3,"[s]")
     if (action.direction == ActionDirection.DST2SRC) or (action.direction == ActionDirection.BOTH):
-        c1 = f"[s]{c1}"
+        c1 = _add_after_spaces(c1,"[s]")
 
     return colour + c1 + "[/]", colour + c2 + "[/]", colour + c3 + "[/]"
 
@@ -244,14 +257,14 @@ class ComparisonSummary(Widget):
 
     KEY_LABELS = ['To upload', 'To download', 'To delete (source)', 'To delete (destination)']
 
-    def __init__(this, results: Union[Iterable[AbstractSyncAction] | None] = None, *args, **kwargs) -> None:
+    def __init__(this, results: Union[SynchingManager | None] = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         this._results = results
 
     @property
     def pending_actions(this):
         if this.results is not None:
-            for r in this._results:
+            for _, r in this._results:
                 if (r.status != SyncStatus.SUCCESS) and (r.type != ActionType.NOTHING):
                     yield r
 
@@ -1083,7 +1096,7 @@ class DirectoryComparisonDataTable(DataTable):
         return (this.changes is None) or (len(this.changes) == 0)
 
     def __getitem__(this, index: int) -> AbstractSyncAction:
-        return this.changes[index]
+        return this._displayed_actions[index]
 
     @property
     def changes(this) -> Union[SynchingManager | None]:
@@ -1113,7 +1126,7 @@ class DirectoryComparisonDataTable(DataTable):
 
         this._displayed_actions = []
 
-        for itm in this._sync_manager:
+        for _,itm in this._sync_manager:
             if (this.show_no_action and (itm.type == ActionType.NOTHING)) or \
                     (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or \
                     (this.show_delete and (itm.type == ActionType.DELETE)):
@@ -1167,19 +1180,16 @@ class DirectoryComparisonDataTable(DataTable):
         if (action is None):
             return
 
-        actions = action.get_nested_actions() + [action]
-
-        new_action = None
+        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
         for itm in actions:
             new_action = this._sync_manager.cancel_action(itm)
             this.update_action(itm, new_action)
 
-        if len(actions)==1:
-            old_parent = new_action.parent_action
-            new_parent = _get_new_parent(this._sync_manager, new_action)
-            this.update_action(old_parent, new_parent)
-
+        if (len(actions)>0):
+            new_parents = _get_new_parent(this._sync_manager, actions[-1])
+            for old, new in new_parents:
+                this.update_action(old, new)
 
 
         this.app.query_one("#summary").refresh()
@@ -1200,8 +1210,8 @@ class DirectoryComparisonDataTable(DataTable):
             except SyncDirectionNotPermittedException:
                 new_action = this._sync_manager.cancel_action(action)
 
-        if new_action is not None:
-            new_action.add_nested_actions(this._sync_manager.get_nested_changes(action))
+        # if new_action is not None:
+        #     new_action.set_nested_actions(this._sync_manager.get_nested_changes(action, levels=1))
 
         this.update_action(action, new_action)
 
@@ -1218,16 +1228,15 @@ class DirectoryComparisonDataTable(DataTable):
         action = this._displayed_actions[this.cursor_row]
         new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
 
-        actions = action.get_nested_actions() + [action]
+        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
         for itm in actions:
             this._change_direction_to_action(itm, new_dir)
 
-        if len(actions)==1:
-            old_parent = actions[0].parent_action
-            new_parent = _get_new_parent(this._sync_manager, actions[0])
-            this.update_action(old_parent, new_parent)
-
+        if (len(actions) > 0):
+            new_parents = _get_new_parent(this._sync_manager, actions[-1])
+            for old, new in new_parents:
+                this.update_action(old, new)
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1237,18 +1246,16 @@ class DirectoryComparisonDataTable(DataTable):
             return
 
         action = this._displayed_actions[this.cursor_row]
-        actions = action.get_nested_actions() + [action]
-
-        new_action = None
+        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
         for itm in actions:
             new_action = this._sync_manager.convert_to_delete(itm)
             this.update_action(itm, new_action)
 
-        if len(actions)==1:
-            old_parent = new_action.parent_action
-            new_parent = _get_new_parent(this._sync_manager, new_action)
-            this.update_action(old_parent, new_parent)
+        if (len(actions) > 0):
+            new_parents = _get_new_parent(this._sync_manager, actions[-1])
+            for old, new in new_parents:
+                this.update_action(old, new)
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1260,7 +1267,7 @@ class DirectoryComparisonDataTable(DataTable):
         # get the action highlighted by the cursor - ie the one the user wants to change
         action = this._displayed_actions[this.cursor_row]
 
-        actions = [action] + action.get_nested_actions()
+        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
         for itm in actions:
             try:
