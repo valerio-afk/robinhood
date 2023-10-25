@@ -77,7 +77,7 @@ Input.-valid {
         border: tall $success 60%;
 }
 
-FileTreeTable
+DirectoryComparisonDataTable
 {
     min-height: 5;
     height:1fr;
@@ -149,7 +149,7 @@ DisplayFilters
 
 .displayed
 {
-    display: block;
+    /*display: block;*/
 }
 
 .hidden

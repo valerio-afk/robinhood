@@ -248,6 +248,8 @@ def compare_tree(src: Union[str | FileSystem],
 
     files = report.stdout.decode().splitlines()
 
+    processed_items = 0
+    total_items = len(files)
 
     # for each line in the stdout
     for i, line in enumerate(files):
@@ -255,7 +257,8 @@ def compare_tree(src: Union[str | FileSystem],
         tag, path = line.split(" ", maxsplit=1)
 
         # Triggers the event that `path` is currently under examination
-        _trigger("on_comparing", SyncEvent(path, processed=i + 1, total=len(files)))
+        _trigger("on_comparing", SyncEvent(path, processed=processed_items, total=(total_items + len(directories))))
+        processed_items+=1
 
         # Converts the path (string) into an *AbstractPath
         src_path = src.new_path(path)
@@ -382,7 +385,14 @@ def compare_tree(src: Union[str | FileSystem],
     # not sure if these should also go in the file cache - not doing it at the moment
 
     for directory in directories:
+
         if len(directory) > 0:
+            _trigger("on_comparing", SyncEvent(directory,
+                                               processed=processed_items,
+                                               total=(total_items + len(directories))
+                                               )
+                     )
+
             a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
             b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
 
@@ -396,6 +406,8 @@ def compare_tree(src: Union[str | FileSystem],
 
             for child in action.get_nested_actions():
                 child.parent_action = parent_view
+
+        processed_items += 1
 
     # Flush file info to cache
     src.flush_file_object_cache()
@@ -456,8 +468,8 @@ def apply_changes(changes: SynchingManager,
         other_actions = SynchingManager(changes.source, changes.destination)
 
         # Check each action if it could be put inside one of the two copy bulks
-        for itm in changes:
-            if (itm.type != ActionType.NOTHING) and (itm.status != SyncStatus.SUCCESS):
+        for itm in changes.changes:
+            if (itm.type != ActionType.NOTHING) and (itm.status != SyncStatus.SUCCESS) and (not itm.filtered):
 
                 # Check the action direction
                 match itm.direction:
@@ -502,38 +514,39 @@ def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
     if (len(filters) > 0):
         filter_set = FilterSet(*filters)
 
-        actions_to_remove = []
+        #actions_to_remove = set()
 
         for i,x in changes:
             if filter_set.filter(x.a) or filter_set.filter(x.b):
-                actions_to_remove.append(i)
+                #actions_to_remove.add(i
+                xx = changes.cancel_action(x,True)
+                xx.filtered = True
+                for nested_action in x.nested_actions:
+                    xx = changes.cancel_action(nested_action,True)
+                    xx.filtered = True
 
-        for idx in actions_to_remove:
-            changes.remove_action(idx)
+        # for idx in actions_to_remove:
+        #     changes.remove_action(idx)
 
 
 def results_for_update(sync_manager: SynchingManager) -> None:
     for _,action in sync_manager:
-        src = action.a
-        dest = action.b
+        if not action.filtered:
+            src = action.a
+            dest = action.b
 
-        if action.direction == ActionDirection.DST2SRC:
-            # action.type = ActionType.NOTHING
-            # action.direction = None
-            sync_manager.cancel_action(action,in_place=True)
-        elif (src is not None) and (dest is not None):
-            if (action.type == ActionType.NOTHING):
-                if (src.size != dest.size):
-                    src_mtime = src.mtime
-                    dest_mtime = dest.mtime
-                    if src_mtime.timestamp() > dest_mtime.timestamp():
-                        new_action = CopySyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
-                        sync_manager.replace(action, new_action)
-                    #     action.direction = ActionDirection.SRC2DST
-                    #     action.type = ActionType.UPDATE
-                    # else:
-                    #     action.type = ActionType.UNKNOWN
-
+            if action.direction == ActionDirection.DST2SRC:
+                # action.type = ActionType.NOTHING
+                # action.direction = None
+                sync_manager.cancel_action(action,in_place=True)
+            elif (src is not None) and (dest is not None):
+                if (action.type == ActionType.NOTHING):
+                    if (src.size != dest.size):
+                        src_mtime = src.mtime
+                        dest_mtime = dest.mtime
+                        if src_mtime.timestamp() > dest_mtime.timestamp():
+                            new_action = CopySyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
+                            sync_manager.replace(action, new_action)
 
 def results_for_mirror(sync_manager: SynchingManager) -> None:
     for _,action in sync_manager:

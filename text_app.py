@@ -18,11 +18,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os.path
-from abc import abstractmethod
 from typing import Dict, Tuple, List, Union, ClassVar, Iterable
 from rich.text import Text
 from rich.console import RenderableType
+from rich.style import Style
 from textual import on, work, events
 from textual.screen import ModalScreen
 from textual.app import App, Binding, Widget, ComposeResult
@@ -389,19 +388,19 @@ class FileDetailsSummary(Widget):
         return None if this.destination_file is None else this.destination_file.mtime
 
     @property
-    def filename(this) -> Union[str | None]:
+    def full_path(this) -> Union[str | None]:
         if (this.source_file is None) and (this.destination_file is None):
             return None
 
-        fullpath = this.destination_file.fullpath if this.source_file is None else this.source_file.fullpath
+        fullpath = this.destination_file.relative_path if this.source_file is None else this.source_file.relative_path
 
-        _, filename = os.path.split(fullpath.absolute_path)
+        #_, filename = os.path.split(fullpath.absolute_path)
 
-        return filename
+        return fullpath
 
     def render(this) -> RenderableType:
 
-        if (this.filename is None):
+        if (this.full_path is None):
             return Text("")
 
         base_style = this.rich_style
@@ -421,7 +420,7 @@ class FileDetailsSummary(Widget):
         local_size = show_formatted_size(this.source_size)
         dest_size = show_formatted_size(this.destination_size)
 
-        text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.filename, key_style)))
+        text.append_text(Text.assemble((f" Filename ", base_style + description_style), (this.full_path, key_style)))
         text.append_text(Text.assemble((f" Size (source) ", base_style + description_style), (local_size, key_style)))
         text.append_text(
             Text.assemble((f" Size (destination) ", base_style + description_style), (dest_size, key_style)))
@@ -990,6 +989,8 @@ class DirectoryComparisonDataTable(DataTable):
         this._show_no_action = True
         this._show_copy_update = True
         this._show_delete = True
+        this._show_new_files = True
+        this._show_filtered = False
 
     def adjust_column_sizes(this) -> None:
         """
@@ -1092,6 +1093,32 @@ class DirectoryComparisonDataTable(DataTable):
             this.refresh_table()
 
     @property
+    def show_new_files(this) -> bool:
+        return this._show_new_files
+
+    @show_new_files.setter
+    def show_new_files(this, value: bool) -> None:
+        refresh = this._show_new_files != value
+
+        this._show_new_files = value
+
+        if refresh:
+            this.refresh_table()
+
+    @property
+    def show_filtered(this) -> bool:
+        return this._show_filtered
+
+    @show_filtered.setter
+    def show_filtered(this, value: bool) -> None:
+        refresh = this._show_filtered != value
+
+        this._show_filtered = value
+
+        if refresh:
+            this.refresh_table()
+
+    @property
     def is_empty(this) -> bool:
         return (this.changes is None) or (len(this.changes) == 0)
 
@@ -1126,11 +1153,33 @@ class DirectoryComparisonDataTable(DataTable):
 
         this._displayed_actions = []
 
-        for _,itm in this._sync_manager:
-            if (this.show_no_action and (itm.type == ActionType.NOTHING)) or \
-                    (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or \
-                    (this.show_delete and (itm.type == ActionType.DELETE)):
+        #
+        show_new_files = lambda itm : this.show_new_files or (itm.a.exists and itm.b.exists)
+        #
+        # is_visible = lambda itm : ( ( (this.show_filtered and is_new_file(itm)) or (not itm.filtered)) and
+        #                           (
+        #                            (this.show_no_action and (itm.type == ActionType.NOTHING)) or
+        #                            (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or
+        #                            (this.show_delete and (itm.type == ActionType.DELETE)) or
+        #                            is_new_file(itm)
+        #                           ) )
+
+        def is_visible(action: AbstractSyncAction):
+            if this.show_filtered and action.filtered:
+                return show_new_files(action)
+            else:
+                return (not action.filtered) and show_new_files(action) and \
+                       ((this.show_no_action and (action.type == ActionType.NOTHING)) or
+                       (this.show_copy_update and (action.type in [ActionType.COPY, ActionType.UPDATE])) or
+                       (this.show_delete and (action.type == ActionType.DELETE)) )
+
+
+
+
+        for itm in this._sync_manager.changes:
+            if is_visible(itm):
                 this._displayed_actions.append(itm)
+
 
         rendered_rows = [''] * len(this._displayed_actions)
 
@@ -1288,6 +1337,11 @@ class DirectoryComparisonDataTable(DataTable):
     def _render_row(this, action:AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
         c1, c2, c3 = _render_row(action, this.ordered_columns[1].width)
 
+        styles = Style.null()
+
+        if action.filtered:
+            styles = Style(color="orange_red1")
+
         c1 = Text.from_markup(c1)
 
         try:
@@ -1301,6 +1355,8 @@ class DirectoryComparisonDataTable(DataTable):
 
         c1.no_wrap = c2.no_wrap = True
 
+        c1.style = c2.style = c3.style = styles
+
         return c1,c2,c3
 
 class DisplayFilters(Widget):
@@ -1312,8 +1368,10 @@ class DisplayFilters(Widget):
 
         this._sub_widgets = {
             "No action": Switch(id="df_no_action", value=True),
+            "New files": Switch(id="df_new_files", value=True),
             "Copy": Switch(id="df_copy", value=True),
-            "Delete": Switch(id="df_delete", value=True)
+            "Delete": Switch(id="df_delete", value=True),
+            "Filtered": Switch(id="df_filtered_files", value=False),
         }
 
     def compose(this) -> ComposeResult:
@@ -1339,3 +1397,7 @@ class DisplayFilters(Widget):
             this._data_table.show_copy_update = event.value
         elif event.switch == this._sub_widgets["Delete"]:
             this._data_table.show_delete = event.value
+        elif event.switch == this._sub_widgets["New files"]:
+            this._data_table.show_new_files = event.value
+        elif event.switch == this._sub_widgets["Filtered"]:
+            this._data_table.show_filtered = event.value
