@@ -18,6 +18,11 @@ Screen {
     width:30%;
 }
 
+Input#df_by_name
+{
+  width:20;
+}
+
 #topbar #textbox_container
 {
     align:center top;
@@ -156,3 +161,11 @@ DisplayFilters
 {
     display: none;
 }
+
+DataTable > .datatable--filtered-row {
+        background: $warning 50%;
+}
+
+DataTable > .datatable--selected-row {
+        background: $primary 50%;
+    }

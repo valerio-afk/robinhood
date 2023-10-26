@@ -140,7 +140,7 @@ class AbstractSyncAction(ABC):
         this._update = None
         this.parent_action_view:Union[SynchingManager.SyncManagerView | None] = None
         this._nested_actions: Union[SynchingManager.SyncManagerView|None] = None
-        this.filtered=False
+        this.excluded=False
 
         this._validate_action_direction()
 
@@ -324,7 +324,7 @@ class CopySyncAction(AbstractSyncAction):
         return "+" if this.is_updating else "*"
 
     def apply_action(this, show_progress=False, eventhandler: [SyncEvent | None] = None) -> None:
-        if this.filtered:
+        if this.excluded:
             return
 
         _trigger = _get_trigger_fn(eventhandler)
@@ -352,7 +352,7 @@ class CopySyncAction(AbstractSyncAction):
             this.stats = SyncStatus.SUCCESS
 
     def _check_success(this) -> None:
-        if (this.status == SyncStatus.SUCCESS) or  this.filtered:
+        if (this.status == SyncStatus.SUCCESS) or  this.excluded:
             return
 
         x = this.a
@@ -393,7 +393,7 @@ class DeleteSyncAction(AbstractSyncAction):
                 raise SyncDirectionNotPermittedException("Both files must exist to support bidirectional action")
 
     def apply_action(this, show_progress=False, eventhandler: [SyncEvent | None] = None) -> None:
-        if this.filtered:
+        if this.excluded:
             return
 
         _trigger = _get_trigger_fn(eventhandler)
@@ -410,7 +410,7 @@ class DeleteSyncAction(AbstractSyncAction):
         _trigger("on_synching", SyncEvent(this))
 
     def _check_success(this) -> None:
-        if (this.status == SyncStatus.SUCCESS) or  this.filtered:
+        if (this.status == SyncStatus.SUCCESS) or  this.excluded:
             return
 
         x = this.a
@@ -449,7 +449,6 @@ class SynchingManager():
     This class manages the application of each action between source and destination directories
     """
 
-
     class SyncManagerView(Iterable[AbstractSyncAction]):
 
         def __init__(this, mng:SynchingManager, keys:Iterable[int]):
@@ -480,10 +479,9 @@ class SynchingManager():
             return SynchingManager.SyncManagerView(mng, indices)
 
 
-
-    def __init__(this, source: FileSystem, destination: FileSystem):
+    def __init__(this, source: FileSystem, destination: Union[FileSystem|None] = None):
         this.source = source
-        this.destination = destination
+        this.destination = destination if destination is not None else source
 
         this._idx = 0
 
@@ -613,7 +611,7 @@ class SynchingManager():
     # TODO: to check the success of directories, add the concept of nested actions and check if them all are successfull
     def apply_changes(this, show_progress: bool = False, eventhandler: [SyncEvent | None] = None) -> None:
         for x in this.changes:
-            if (x.status != SyncStatus.SUCCESS) and (not x.filtered):
+            if (x.status != SyncStatus.SUCCESS) and (not x.excluded):
                 x.apply_action(show_progress, eventhandler)
                 this.flush_action(x)
 
@@ -624,7 +622,9 @@ class SynchingManager():
         Flushes the file system cache into the disk (JSON file) after changes have been applied
         """
         this.source.flush_file_object_cache()
-        this.destination.flush_file_object_cache()
+
+        if this.destination is not None:
+            this.destination.flush_file_object_cache()
 
     def flush_action(this, action: AbstractSyncAction) -> None:
         """
@@ -674,6 +674,7 @@ class SynchingManager():
                                                      _match_levels(action.b.absolute_path, this._changes[x].b.absolute_path, levels)]
 
         return SynchingManager.SyncManagerView(this, actions_idx)
+
 
     @classmethod
     def make_action(cls, source: FileSystemObject,
@@ -769,7 +770,7 @@ class BulkCopySynchingManager(SynchingManager):
 
         with open(path, "w") as handle:
             for x in this.changes:
-                if not x.filtered:
+                if not x.excluded:
                     fso = x.a if this._direction == ActionDirection.SRC2DST else x.b
                     if fso.type == FileType.REGULAR:
                         handle.write(f"{fso.relative_path}\n")
@@ -788,7 +789,7 @@ class BulkCopySynchingManager(SynchingManager):
 
         # Better double-checking again when it's done if everything has been copied successfully
         for itm in this.changes:
-            if (itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]) and (not itm.filtered):
+            if (itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]) and (not itm.excluded):
                 itm._check_success()
                 _trigger("on_synching", SyncEvent(itm))
                 this.flush_action(itm)

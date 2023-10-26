@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from typing import Dict, Tuple, List, Union, ClassVar, Iterable
+from typing import Dict, Tuple, List, Union, ClassVar, Iterable, Set
 from rich.text import Text
 from rich.console import RenderableType
 from rich.style import Style
@@ -37,11 +37,13 @@ from textual.coordinate import Coordinate
 from backend import SyncMode, RobinHoodBackend, compare_tree, ActionType, SyncEvent, kill_all_subprocesses
 from backend import ActionDirection, FileType, apply_changes, FileSystemObject, find_dedupe
 from synching import SyncProgress, AbstractSyncAction, SynchingManager, SyncStatus, SyncDirectionNotPermittedException
-from synching import CopySyncAction, DeleteSyncAction
+from synching import CopySyncAction
 from commands import make_command
 from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine, sizeof_fmt
 from datetime import datetime
+from fnmatch import fnmatch
 from config import RobinHoodConfiguration, RobinHoodProfile
+
 import re
 
 _SyncMethodsPrefix: Dict[SyncMode, str] = {
@@ -787,9 +789,9 @@ class RobinHood(App):
         this._update_job_related_interface()
 
     @work(exclusive=True, name="comparison", thread=True)
-    def _run_comparison(this, mode: SyncMode) -> None:
-        result = compare_tree(this.src, this.dst, mode=mode, profile=this.profile, eventhandler=this._backend)
-        this.call_from_thread(this.show_results, result)
+    async def _run_comparison(this, mode: SyncMode) -> None:
+        result = compare_tree(src=this.src, dest=this.dst, mode=mode, profile=this.profile, eventhandler=this._backend)
+        this.show_results(result)
 
     @work(exclusive=True, name="comparison", thread=True)
     def _run_dedupe(this) -> None:
@@ -972,7 +974,15 @@ class DirectoryComparisonDataTable(DataTable):
         Binding("right", "change_direction('right')", "Change Action Direction", show=False),
         Binding("=", "change_direction_to_both", "Apply action to both sides", show=False),
         Binding("delete", "delete_file", "Delete File", show=False),
+        Binding("enter","toggle_selection","Select Row", show=False),
+        Binding("escape", "clear_selections", "Select Row", show=False),
+        Binding("ctrl+a", "select_all", "Select all visible", show=False)
     ]
+
+    COMPONENT_CLASSES: ClassVar[set[str]] = {
+        "datatable--filtered-row",
+        "datatable--selected-row"
+    }
 
     def __init__(this, *args, **kwargs):
         kwargs["cursor_type"] = "row"
@@ -985,12 +995,15 @@ class DirectoryComparisonDataTable(DataTable):
 
         this._sync_manager: [SynchingManager | None] = None
         this._displayed_actions: List[AbstractSyncAction] = []
+        this._selected_actions: Set[int] = set()
 
         this._show_no_action = True
         this._show_copy_update = True
         this._show_delete = True
         this._show_new_files = True
-        this._show_filtered = False
+        this._show_excluded = False
+        this._filter_by_name = None
+
 
     def adjust_column_sizes(this) -> None:
         """
@@ -1106,14 +1119,14 @@ class DirectoryComparisonDataTable(DataTable):
             this.refresh_table()
 
     @property
-    def show_filtered(this) -> bool:
-        return this._show_filtered
+    def show_excluded(this) -> bool:
+        return this._show_excluded
 
-    @show_filtered.setter
-    def show_filtered(this, value: bool) -> None:
-        refresh = this._show_filtered != value
+    @show_excluded.setter
+    def show_excluded(this, value: bool) -> None:
+        refresh = this._show_excluded != value
 
-        this._show_filtered = value
+        this._show_excluded = value
 
         if refresh:
             this.refresh_table()
@@ -1134,6 +1147,20 @@ class DirectoryComparisonDataTable(DataTable):
         """
         return this._sync_manager
 
+    def filter_by_name(this, pattern:Union[str|None]) -> None:
+        if pattern == None:
+            this._filter_by_name = None
+
+        pattern = pattern.strip()
+
+        if (len(pattern)==0):
+            this._filter_by_name = None
+        else:
+            this._filter_by_name = f"*{pattern}*"
+
+        this.refresh_table()
+
+
     def show_results(this, changes: Union[SynchingManager | None]) -> None:
 
         if (changes is None):
@@ -1151,35 +1178,43 @@ class DirectoryComparisonDataTable(DataTable):
         if (this._sync_manager is None):
             return None
 
+        # The property _selected_actions contains the position of the actions. When the table is refreshed, these
+        # actions are likely to be placed in a different position, or even filtered out (ie not visible)
+        # This needs to be fixed. I save the actual action objects retrieved from their positions
+        # After I know what to display, I retrieve their new indices
+
+        selected_actions = [this._displayed_actions[i] for i in this._selected_actions]
+
+        # Reset the set of selected actions, as well as clean the list of displayed actions
+        this._selected_actions = set()
         this._displayed_actions = []
 
-        #
         show_new_files = lambda itm : this.show_new_files or (itm.a.exists and itm.b.exists)
-        #
-        # is_visible = lambda itm : ( ( (this.show_filtered and is_new_file(itm)) or (not itm.filtered)) and
-        #                           (
-        #                            (this.show_no_action and (itm.type == ActionType.NOTHING)) or
-        #                            (this.show_copy_update and (itm.type in [ActionType.COPY, ActionType.UPDATE])) or
-        #                            (this.show_delete and (itm.type == ActionType.DELETE)) or
-        #                            is_new_file(itm)
-        #                           ) )
 
         def is_visible(action: AbstractSyncAction):
-            if this.show_filtered and action.filtered:
+            if this._filter_by_name != None:
+                match = fnmatch(action.a.relative_path.lower(),this._filter_by_name.lower())
+
+                if match == False:
+                    return False
+
+            if this.show_excluded and action.excluded:
                 return show_new_files(action)
             else:
-                return (not action.filtered) and show_new_files(action) and \
+                return (not action.excluded) and show_new_files(action) and \
                        ((this.show_no_action and (action.type == ActionType.NOTHING)) or
                        (this.show_copy_update and (action.type in [ActionType.COPY, ActionType.UPDATE])) or
                        (this.show_delete and (action.type == ActionType.DELETE)) )
 
-
-
-
+        i = 0
         for itm in this._sync_manager.changes:
             if is_visible(itm):
                 this._displayed_actions.append(itm)
 
+                if itm in selected_actions:
+                    this._selected_actions.add(i)
+
+                i+=1
 
         rendered_rows = [''] * len(this._displayed_actions)
 
@@ -1218,27 +1253,44 @@ class DirectoryComparisonDataTable(DataTable):
         except ValueError:  # This exception is raised when the .index_of method fails
             ...
 
+    def clear_selections(this) -> None:
+        this._selected_actions.clear()
+
+    def action_select_all(this) -> None:
+        this._selected_actions = list(range(0,len(this._displayed_actions)))
+        this.refresh_table()
+    def action_clear_selections(this) -> None:
+        this.clear_selections()
+        this.refresh_table()
+    def action_toggle_selection(this):
+        # get the action highlighted by the cursor - ie the one the user wants to change
+        idx = this.cursor_row
+
+        if idx in this._selected_actions:
+            this._selected_actions.remove(idx)
+        else:
+            this._selected_actions.add(idx)
+
+        this.refresh_row(this.cursor_row)
     def action_cancel_action(this):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
-        # get the action highlighted by the cursor - ie the one the user wants to change
-        action = this._displayed_actions[this.cursor_row]
 
-        # do we really need this guard clause?
-        if (action is None):
-            return
+        for action in this.selected_actions:
+            # get the action highlighted by the cursor - ie the one the user wants to change
 
-        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
-        for itm in actions:
-            new_action = this._sync_manager.cancel_action(itm)
-            this.update_action(itm, new_action)
+            actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
-        if (len(actions)>0):
-            new_parents = _get_new_parent(this._sync_manager, actions[-1])
-            for old, new in new_parents:
-                this.update_action(old, new)
+            for itm in actions:
+                new_action = this._sync_manager.cancel_action(itm)
+                this.update_action(itm, new_action)
+
+            if (len(actions)>0):
+                new_parents = _get_new_parent(this._sync_manager, actions[-1])
+                for old, new in new_parents:
+                    this.update_action(old, new)
 
 
         this.app.query_one("#summary").refresh()
@@ -1274,18 +1326,18 @@ class DirectoryComparisonDataTable(DataTable):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
-        action = this._displayed_actions[this.cursor_row]
-        new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
+        for action in this.selected_actions:
+            new_dir = ActionDirection.SRC2DST if key == "right" else ActionDirection.DST2SRC
 
-        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
+            actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
-        for itm in actions:
-            this._change_direction_to_action(itm, new_dir)
+            for itm in actions:
+                this._change_direction_to_action(itm, new_dir)
 
-        if (len(actions) > 0):
-            new_parents = _get_new_parent(this._sync_manager, actions[-1])
-            for old, new in new_parents:
-                this.update_action(old, new)
+            if (len(actions) > 0):
+                new_parents = _get_new_parent(this._sync_manager, actions[-1])
+                for old, new in new_parents:
+                    this.update_action(old, new)
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1294,17 +1346,17 @@ class DirectoryComparisonDataTable(DataTable):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
-        action = this._displayed_actions[this.cursor_row]
-        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
+        for action in this.selected_actions:
+            actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
-        for itm in actions:
-            new_action = this._sync_manager.convert_to_delete(itm)
-            this.update_action(itm, new_action)
+            for itm in actions:
+                new_action = this._sync_manager.convert_to_delete(itm)
+                this.update_action(itm, new_action)
 
-        if (len(actions) > 0):
-            new_parents = _get_new_parent(this._sync_manager, actions[-1])
-            for old, new in new_parents:
-                this.update_action(old, new)
+            if (len(actions) > 0):
+                new_parents = _get_new_parent(this._sync_manager, actions[-1])
+                for old, new in new_parents:
+                    this.update_action(old, new)
 
         this.app.query_one("#summary").refresh()
         this.app._update_job_related_interface()
@@ -1313,34 +1365,44 @@ class DirectoryComparisonDataTable(DataTable):
         if (this.changes is None) or (len(this._displayed_actions) == 0):
             return
 
-        # get the action highlighted by the cursor - ie the one the user wants to change
-        action = this._displayed_actions[this.cursor_row]
+        for action in this.selected_actions:
 
-        actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
+            actions = list(this._sync_manager.get_nested_changes(action, levels=None)) + [action]
 
-        for itm in actions:
-            try:
+            for itm in actions:
+                try:
 
-                itm.apply_both_sides()
+                    itm.apply_both_sides()
 
-                this.update_action(itm)
-                this.app.query_one("#summary").refresh()
-                this.app._update_job_related_interface()
-            except (SyncDirectionNotPermittedException, FileNotFoundError):
-                ...
+                    this.update_action(itm)
+                except (SyncDirectionNotPermittedException, FileNotFoundError):
+                    ...
 
-        if len(actions)==1:
-            old_parent = actions[0].parent_action
-            new_parent = _get_new_parent(this._sync_manager, actions[0])
-            this.update_action(old_parent, new_parent)
+            if len(actions)==1:
+                new_parents = _get_new_parent(this._sync_manager, actions[0])
+                for old, new in new_parents:
+                    this.update_action(old, new)
+
+        this.app.query_one("#summary").refresh()
+        this.app._update_job_related_interface()
+
+    def _get_row_style(this, row_index: int, base_style: Style) -> Style:
+        row_style = super()._get_row_style(row_index, base_style)
+
+        if (len(this._displayed_actions)>0) and (row_index>=0):
+            if row_index in this._selected_actions:
+                row_style = this.get_component_styles("datatable--selected-row").rich_style
+            elif this._displayed_actions[row_index].excluded:
+                row_style = this.get_component_styles("datatable--filtered-row").rich_style
+
+
+        return row_style
+
 
     def _render_row(this, action:AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
         c1, c2, c3 = _render_row(action, this.ordered_columns[1].width)
 
         styles = Style.null()
-
-        if action.filtered:
-            styles = Style(color="orange_red1")
 
         c1 = Text.from_markup(c1)
 
@@ -1359,6 +1421,20 @@ class DirectoryComparisonDataTable(DataTable):
 
         return c1,c2,c3
 
+    @on(DataTable.RowHighlighted)
+    def on_row_highlighted(this,*args, **kwargs) -> None:
+        this._clear_caches()
+        for idx in this._selected_actions:
+            this.refresh_row(idx)
+
+    @property
+    def selected_actions(this) -> Iterable[AbstractSyncAction]:
+        selected = this._selected_actions.copy()
+        selected.add(this.cursor_row)
+
+        for id in selected:
+            yield this._displayed_actions[id]
+
 class DisplayFilters(Widget):
 
     def __init__(this, data_table: DirectoryComparisonDataTable, *args, **kwargs):
@@ -1371,7 +1447,8 @@ class DisplayFilters(Widget):
             "New files": Switch(id="df_new_files", value=True),
             "Copy": Switch(id="df_copy", value=True),
             "Delete": Switch(id="df_delete", value=True),
-            "Filtered": Switch(id="df_filtered_files", value=False),
+            "Excluded": Switch(id="df_excluded_files", value=False),
+            "Filter by name": Input(None,placeholder="Filter by name", id="df_by_name")
         }
 
     def compose(this) -> ComposeResult:
@@ -1399,5 +1476,9 @@ class DisplayFilters(Widget):
             this._data_table.show_delete = event.value
         elif event.switch == this._sub_widgets["New files"]:
             this._data_table.show_new_files = event.value
-        elif event.switch == this._sub_widgets["Filtered"]:
-            this._data_table.show_filtered = event.value
+        elif event.switch == this._sub_widgets["Excluded"]:
+            this._data_table.show_excluded = event.value
+
+    @on(Input.Submitted)
+    def on_change(this, event: Input.Submitted):
+        this._data_table.filter_by_name(this._sub_widgets["Filter by name"].value)

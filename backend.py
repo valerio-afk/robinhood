@@ -169,7 +169,7 @@ def find_dedupe(path: Union[str | FileSystem],
 
     fs.load()
 
-    actions = []
+    manager = SynchingManager(fs)
     size_organiser = {}
 
     for fso in fs.walk():
@@ -189,11 +189,11 @@ def find_dedupe(path: Union[str | FileSystem],
 
             if a.checksum == b.checksum:
                 action = SynchingManager.make_action(a,b,type=ActionType.DELETE, direction=ActionDirection.SRC2DST)
-                actions.append(action)
+                manager.add_action(action)
 
-    _trigger("after_comparing", SyncEvent(actions))
+    _trigger("after_comparing", SyncEvent(manager))
 
-    return actions
+    return manager
 
 
 
@@ -234,7 +234,7 @@ def compare_tree(src: Union[str | FileSystem],
 
     # define an  empty set of directories that will be needed below
 
-    directories = set()
+    directories = {}
 
     # Asks rclone to compute the differences betweeen those two directories
 
@@ -285,7 +285,10 @@ def compare_tree(src: Union[str | FileSystem],
         past_dest_object = dest.get_previous_version(dest_path)
 
         # add directory to the set of directories
-        directories.add(os.path.split(src_path.relative_path)[0])
+        parent_directory = os.path.split(src_path.relative_path)[0]
+
+        #TODO: Change this with a SyncView
+        nested_actions = directories.setdefault(parent_directory, list())
 
         # By default, it's assumed that the standard way to transfer files is from source -> destination
         # Specific cases are treated below
@@ -367,51 +370,7 @@ def compare_tree(src: Union[str | FileSystem],
 
         action = SynchingManager.make_action(source_object, dest_object, type=type, direction=direction)
         sync_changes.add_action(action)
-
-    def _tree_sort_fn(x:[AbstractSyncAction|str]) -> Tuple[str,...]:
-        """
-        This nested function is to support the fullpath sorting, having longer paths to the end
-        It is used in the `key` parameter of sorting functions
-        :param x: The item to be sorted
-        :return: A tuple containing the path split by its components
-        """
-        path = x if isinstance(x,str) else x.a.absolute_path
-        p = AbstractPath.split(path)
-        return p
-
-    directories = sorted(directories,key=_tree_sort_fn, reverse=True)
-
-    # add directories information to the list of action
-    # not sure if these should also go in the file cache - not doing it at the moment
-
-    for directory in directories:
-
-        if len(directory) > 0:
-            _trigger("on_comparing", SyncEvent(directory,
-                                               processed=processed_items,
-                                               total=(total_items + len(directories))
-                                               )
-                     )
-
-            a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
-            b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
-
-            action = NoSyncAction(a,b)
-
-            action.set_nested_actions( sync_changes.get_nested_changes(action))
-            parent_key = sync_changes.add_action(action)
-
-            parent_view = SynchingManager.SyncManagerView(sync_changes, [parent_key])
-
-
-            for child in action.get_nested_actions():
-                child.parent_action = parent_view
-
-        processed_items += 1
-
-    # Flush file info to cache
-    src.flush_file_object_cache()
-    dest.flush_file_object_cache()
+        nested_actions.append(action)
 
     # Filter results utilising user-defined filters
     filter_results(sync_changes, profile)
@@ -424,6 +383,73 @@ def compare_tree(src: Union[str | FileSystem],
             results_for_mirror(sync_changes)
 
 
+    for directory,nested_actions in directories.items():
+
+        if len(directory) > 0:
+            _trigger("on_comparing", SyncEvent(directory,
+                                               processed=processed_items,
+                                               total=(total_items + len(directories))
+                                               )
+                     )
+
+            a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
+            b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
+
+            src_actual_files = 0
+            dst_actual_files = 0
+
+            for itm in nested_actions:
+                if not itm.excluded:
+                    if itm.a.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.DST2SRC):
+                        src_actual_files+=1
+
+                    if itm.b.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.SRC2DST):
+                        dst_actual_files+=1
+
+            # The following if-else is useful to get rid of empty directories
+            if (src_actual_files>0) and (dst_actual_files>0):
+                action = NoSyncAction(a, b)
+            else:
+                direction = ActionDirection.BOTH
+
+                if (src_actual_files>0) and (dst_actual_files==0):
+                    direction = ActionDirection.SRC2DST
+                elif (src_actual_files==0) and (dst_actual_files>0):
+                    direction = ActionDirection.DST2SRC
+
+                action = DeleteSyncAction(a, b, direction)
+
+
+            action.set_nested_actions(SynchingManager.SyncManagerView(
+                sync_changes,
+                [sync_changes.index_of(itm) for itm in nested_actions]
+            ))
+
+            parent_key = sync_changes.add_action(action)
+            parent_view = SynchingManager.SyncManagerView(sync_changes, [parent_key])
+
+            for child in action.get_nested_actions():
+                child.parent_action = parent_view
+
+        processed_items += 1
+
+    # Flush file info to cache
+    src.flush_file_object_cache()
+    dest.flush_file_object_cache()
+
+
+
+
+    def _tree_sort_fn(x:[AbstractSyncAction|str]) -> Tuple[str,...]:
+        """
+        This nested function is to support the fullpath sorting, having longer paths to the end
+        It is used in the `key` parameter of sorting functions
+        :param x: The item to be sorted
+        :return: A tuple containing the path split by its components
+        """
+        path = x if isinstance(x,str) else x.a.absolute_path
+        p = AbstractPath.split(path)
+        return p
 
     sync_changes.sort(key=_tree_sort_fn)
 
@@ -469,7 +495,7 @@ def apply_changes(changes: SynchingManager,
 
         # Check each action if it could be put inside one of the two copy bulks
         for itm in changes.changes:
-            if (itm.type != ActionType.NOTHING) and (itm.status != SyncStatus.SUCCESS) and (not itm.filtered):
+            if (itm.type != ActionType.NOTHING) and (itm.status != SyncStatus.SUCCESS) and (not itm.excluded):
 
                 # Check the action direction
                 match itm.direction:
@@ -520,10 +546,10 @@ def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
             if filter_set.filter(x.a) or filter_set.filter(x.b):
                 #actions_to_remove.add(i
                 xx = changes.cancel_action(x,True)
-                xx.filtered = True
+                xx.excluded = True
                 for nested_action in x.nested_actions:
                     xx = changes.cancel_action(nested_action,True)
-                    xx.filtered = True
+                    xx.excluded = True
 
         # for idx in actions_to_remove:
         #     changes.remove_action(idx)
@@ -531,7 +557,7 @@ def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
 
 def results_for_update(sync_manager: SynchingManager) -> None:
     for _,action in sync_manager:
-        if not action.filtered:
+        if not action.excluded:
             src = action.a
             dest = action.b
 
@@ -555,8 +581,6 @@ def results_for_mirror(sync_manager: SynchingManager) -> None:
 
         if (action.direction == ActionDirection.DST2SRC) or ((src is not None) and (dest is not None)):
             if (src.size != dest.size):
-                action.direction = ActionDirection.SRC2DST
-
                 new_action = None
 
                 if (not src.exists) and (action.type != ActionType.DELETE):

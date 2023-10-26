@@ -449,6 +449,7 @@ class FileSystemObject:
         this.hidden = hidden
         this._exists = exists
         this._checksum = checksum
+        this._is_empty = None
 
     @property
     def absolute_path(this) -> str:
@@ -529,10 +530,15 @@ class FileSystemObject:
         if this.type != FileType.DIR:
             raise TypeError("Cannot determine the emptiness of something that is not a directory")
 
+        if this._is_empty is not None:
+            return this._is_empty
+
         p = subprocess.run(['rclone', 'ls', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = p.stdout.decode().strip()
 
-        return (p.returncode == 0) and (len(output) == 0)
+        this._is_empty = (p.returncode == 0) and (len(output) == 0)
+
+        return this._is_empty
 
     @mtime.setter
     def mtime(this, mtime: Union[datetime | None]) -> None:
@@ -1000,6 +1006,17 @@ class FileSystem(ABC):
 
         this._path.cd(path)
 
+    def is_empty(this, path:str):
+        """
+        Check if a directory is empty
+        :param path: path to a directory
+        :return: TRUE if the  provided directory is empty, FALSE otherwise
+        """
+        x = list(this.ls(path))
+
+        return True if len(x) == 0 else False
+
+
     def visit(this, path):
         """
         Returns a new Path located at the specified location
@@ -1073,6 +1090,8 @@ class FileSystem(ABC):
                 "timestamp": datetime.now().timestamp(),
                 "files": fsos
             }, h)
+
+
 
 
 class LocalFileSystem(FileSystem):
