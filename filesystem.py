@@ -19,7 +19,9 @@
 # SOFTWARE.
 
 from __future__ import annotations
-from typing import Any, Union, List, Tuple, Type, Iterable, Dict
+
+import asyncio
+from typing import Any, Union, List, Type, Iterable, Dict, AsyncIterable, Tuple
 from abc import ABC, abstractmethod
 from enum import Enum
 from rclone_python import rclone
@@ -27,11 +29,17 @@ from datetime import datetime
 from copy import copy
 from psutil import disk_partitions
 from config import get_cache_file
+from time import sleep
 import os
-import re
 import stat
 import subprocess
 import json
+import aiofiles
+import sys
+
+sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
+from pyrclone import rclone
+from pyrclone.jobs import _fix_isotime
 
 # Checks whether RH is running under windows or not
 is_windows = lambda: os.name == 'nt'
@@ -42,29 +50,15 @@ current_timezone = lambda: datetime.now().astimezone().tzinfo
 UNITS = ("", "K", "M", "G", "T", "P", "E", "Z")
 
 
-def _fix_isotime(time: str) -> str:
-    '''
-    The ISO time returned by rclone (at least when tested on MEGA) returns a format that datetime doesn't like
-    This function fixes these issues
+def rclone_instance() -> rclone:
+    if not hasattr(rclone_instance, "_instance"):
+        # TODO: use auth
+        rclone_instance._instance = rclone().run()
+        sleep(0.5)
 
-    :param time: a string with a ISO timestamp
-    :return: A string with a re-formatted timestamp
-    '''
+    return rclone_instance._instance
 
-    # Defines a regular expression to find the inconsistencies
-    pattern = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]*)?(\+[0-9]{2}:[0-9]{2}|[a-zA-Z])?"
 
-    # Finds and match inconsistencies
-    matches = re.search(pattern, time)
-
-    # Fixes inconsistencies
-    if matches[1] is not None:
-        time = time.replace(matches[1], "")
-    if (matches[2] is not None) and (not matches[2].startswith("+")):
-        time = time.replace(matches[2], "")
-
-    # Returns a new string with fixed timestamp
-    return time
 
 
 def sizeof_fmt(num: int, suffix: str = "B") -> str:
@@ -111,23 +105,17 @@ def convert_to_bytes(value: float, unit: str) -> int:
     return int(value)
 
 
-def get_rclone_remotes() -> List[Tuple[str, ...]]:
-    '''
-    Get the list of remote directories from rclone
+def _tree_sort_fn(path: str) -> List[str, ...]:
+    """
+    This nested function is to support the fullpath sorting, having longer paths to the end
+    It is used in the `key` parameter of sorting functions
+    :param x: The item to be sorted
+    :return: A tuple containing the path split by its components
+    """
 
-    :return: A list of tuples each containing the name and type
-    '''
+    p = AbstractPath.split(path)
 
-    # Run rclone via subprocess to get the list of remotes
-    output = subprocess.run(
-        ["rclone", "listremotes", "--long"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf-8"
-    )
-
-    # make the tuples and the list via 2 list comprehensions
-    return [tuple([x.strip() for x in line.split(":")[::-1]]) for line in output.stdout.strip().splitlines()]
+    return p
 
 
 class AbstractPath(ABC):
@@ -285,7 +273,7 @@ class AbstractPath(ABC):
         return [t for t in tokens if len(t) > 0]
 
     @classmethod
-    def is_root_of(cls, path:str, root:str) -> bool:
+    def is_root_of(cls, path: str, root: str) -> bool:
         if cls.is_relative(path):
             return True
 
@@ -472,18 +460,18 @@ class FileSystemObject:
         return os.path.split(this.absolute_path)[1]
 
     @property
-    def is_remote(this) -> bool:
+    async def is_remote(this) -> bool:
         """
         Checks if the fs object is rooted in a remote drive (doesn't check if it exists remotely)
         :return: TRUE if it's in any of the remote drives, FALSE otherwise
         """
-        for _, drive in get_rclone_remotes():
+        async for _, drive in rclone_instance().list_remotes():
             if this.absolute_path.startswith(drive):
                 return True
         return False
 
     @property
-    def is_local(this) -> bool:
+    async def is_local(this) -> bool:
         """
         Checks if the fs object is rooted in a local drive (doesn't check if it exists remotely)
         :return: TRUE if it's in any of the local drives, FALSE otherwise
@@ -806,11 +794,15 @@ class FileSystem(ABC):
     It contains some useful functionality (eg caching) for the inherited classes
     """
 
-    def __init__(this, path: str, *, path_manager: Type[AbstractPath], cached: bool = False, force: bool = False):
+    def __init__(this, path: str, *,
+                 path_manager: Type[AbstractPath],
+                 cached: bool = False,
+                 force: bool = False):
         """
 
         :param path: The root path of the file system
         :param path_manager: Path convention to use (POSIX- or NT-like)
+        :param Interface to rclone
         :param cached: Whether to cache content or not
         :param force: Force to check the existence of the root directory
         """
@@ -828,52 +820,112 @@ class FileSystem(ABC):
 
         this._cached = cached
 
+        this._cache = dict()
+
         if (not force) and (not this.exists(this.root)):
             raise FileNotFoundError(this.root)
 
-    @abstractmethod
-    def _load(this) -> None:
-        """
-        Loads the cache into memory.
-        This method needs to be implemented becaue each subclass can load and represents cache differently.
-        """
-        ...
-
-    @abstractmethod
-    def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
+    async def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
         """
         Finds a directory and its content in the cache
         :param dir: directory to search in the cache
         :return: An iterable if the directory exists, None otherwise
         """
-        ...
 
-    @abstractmethod
-    def ls(this, path: Union[str | None] = None) -> Iterable[FileSystemObject]:
+        dir_to_search = this.new_path(dir, root=this.base_path).relative_path
+
+        for itm in this._cache:
+            remote_path = "/" + itm['Path']
+            if (remote_path == dir) or (remote_path == dir_to_search):
+                return itm
+
+        return None
+
+
+    async def ls(this, path: Union[str | None] = None) -> Iterable[FileSystemObject]:
         """
         Returns the content of the path. If path is not provided, returns the content of the current working directory
         :param path: The path where to list its content. None will return the content of the cwd
         :return: An iterable of FileSystemObjects representing the content of the path
         """
-        ...
+        cp = this.current_path if path is None else path
+        cp = this.new_path(cp, root=this.base_path)
 
-    @abstractmethod
-    def exists(this, filename) -> bool:
+        content = [this._make_filesystem_object(x, cp.relative_path) for x in (await this._dir(cp))]
+
+        return content
+
+    def _make_filesystem_object(this, dic: dict, path: str) -> FileSystemObject:
+        type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
+
+        fullpath = this.new_path(AbstractPath.join(path, dic['Name']), root=this.root)
+
+        if (this.cached):
+            cached_fso = this._get_fso_from_cache(fullpath)
+            if (cached_fso is not None):
+                cached_fso.update_information()
+                return cached_fso
+
+        mod_time = _fix_isotime(dic['ModTime'])  # fixing mega.nz bug
+
+        fso = FileSystemObject(fullpath,
+                               type=type,
+                               size=dic['Size'],
+                               mtime=datetime.fromisoformat(mod_time),
+                               exists=True)
+
+        if this.cached:
+            this.set_file(fullpath, fso)
+
+        return fso
+
+    async def _dir(this, path:AbstractPath) -> List[Dict]:
+        dir = []
+
+        # if (path.startswith("/")): path = path[1:]
+
+        items = this._cache if this.cached else (await rclone_instance().ls(path.root, path.relative_path))
+        relpath = path.relative_path
+
+        if (relpath == "."): relpath = ""
+
+        for itm in items:
+            p, tail = os.path.split(itm['Path'])
+
+            if (p == relpath):
+                dir.append(itm)
+
+        return dir
+
+
+    async def exists(this, filename) -> bool:
         """
         Checks if a file or directory exists
         :param filename: File or directory name to check its existance
         :return: TRUE if exists, FALSE otherwise
         """
-        ...
+        p = this.visit(filename)
 
-    @abstractmethod
+        return await rclone_instance().exists(p.root,p.relative_path)
+
     def get_file(this, path: AbstractPath) -> FileSystemObject:
         """
         Returns a FileSystemObject from path. The FileSystemObject contains useful information about the file/directory
         :param path: The path to get information from
         :return: A FileSystemObject of representing path
         """
-        ...
+        p, name = os.path.split(path.relative_path)
+
+        parent_path = this.new_path(p)
+
+        content = this._dir(parent_path)
+
+        for itm in content:
+            if itm['Name'] == name:
+                return this._make_filesystem_object(itm, parent_path.absolute_path)
+
+        raise FileNotFoundError(f"No such file or directory: '{path}'")
+
 
     def set_file(this, path: AbstractPath, fo: Union[FileSystemObject | None]) -> None:
         """
@@ -935,14 +987,15 @@ class FileSystem(ABC):
         p = path.relative_path
         return this._file_objects_cache[p] if p in this._file_objects_cache.keys() else None
 
-    def _load_previous_file_system_objects_cache(this) -> None:
+    async def _load_previous_file_system_objects_cache(this) -> None:
         cache_filename = get_cache_file(this.root)
 
         if not os.path.exists(cache_filename):
             return
 
-        with open(cache_filename, 'r') as h:
-            d = json.load(h)
+        async with aiofiles.open(cache_filename, mode='r') as h:
+            content = await h.read()
+            d = json.loads(content)
             if d['root'] != this.root:
                 return
 
@@ -980,7 +1033,7 @@ class FileSystem(ABC):
 
             return None
 
-    def load(this, force=True) -> None:
+    async def load(this, force=True) -> None:
         """
         Loads the cache into memory
         :param force: if TRUE, loads the cache even if the cache is full
@@ -988,11 +1041,11 @@ class FileSystem(ABC):
 
         if force:
             # load the file system object cache from a previous run
-            this._load_previous_file_system_objects_cache()
+            await this._load_previous_file_system_objects_cache()
             # manages the tree cache
             if (this._tree_cache is None) or (len(this._tree_cache) == 0):
                 if (not this.cached) or force:
-                    this._load()
+                    this._cache = await rclone_instance().ls(this.base_path, "", recursive=True)
 
     def cd(this, path) -> None:
         """
@@ -1006,7 +1059,7 @@ class FileSystem(ABC):
 
         this._path.cd(path)
 
-    def is_empty(this, path:str):
+    def is_empty(this, path: str):
         """
         Check if a directory is empty
         :param path: path to a directory
@@ -1016,7 +1069,6 @@ class FileSystem(ABC):
 
         return True if len(x) == 0 else False
 
-
     def visit(this, path):
         """
         Returns a new Path located at the specified location
@@ -1025,7 +1077,7 @@ class FileSystem(ABC):
         """
         return this._path.visit(path)
 
-    def walk(this, path: Union[AbstractPath | None] = None) -> Iterable[FileSystemObject]:
+    async def walk(this, path: Union[AbstractPath | None] = None) -> AsyncIterable[FileSystemObject]:
         '''
         Iterate over all files recusiverly from the path (if provided)
         :param path: The path to start walking from. If not specified, the current working  directory is used
@@ -1038,9 +1090,10 @@ class FileSystem(ABC):
         while len(dirs) > 0:
             d = dirs.pop()
 
-            for fso in this.ls(d):
+            for fso in (await this.ls(d)):
                 match fso.type:
                     case FileType.DIR:
+                        yield fso
                         dirs.append(fso.absolute_path)
                     case FileType.REGULAR:
                         yield fso
@@ -1092,8 +1145,6 @@ class FileSystem(ABC):
             }, h)
 
 
-
-
 class LocalFileSystem(FileSystem):
 
     def __init__(this, *args, **kwargs):
@@ -1102,99 +1153,93 @@ class LocalFileSystem(FileSystem):
 
         super().__init__(*args, **kwargs)
 
-        # this.add_filter_callback(lambda x : x.type != FileType.OTHER) # remove "other" files
+    # async def _find_local(this, path):
+    #     dirs = []
+    #     files = []
+    #
+    #     path = this.new_path(path, this.root)
+    #
+    #     try:
+    #         for itm in os.scandir(path.absolute_path):
+    #             if itm.is_dir():
+    #                 dirs.append(itm.name)
+    #             elif itm.is_file():
+    #                 files.append(itm.name)
+    #             await asyncio.sleep(0.1)
+    #
+    #         return (path.absolute_path, dirs, files)
+    #     except FileNotFoundError:
+    #         return None
 
-    def _load(this):
-        if this.cached:
-            this._cache = [(this.new_path(path, root=this.base_path).relative_path, dirs, files) for path, dirs, files
-                           in os.walk(this.base_path)]
+    # def _find_dir_in_cache(this, dir):
+    #     dir_to_search = this.new_path(dir, root=this.base_path).relative_path
+    #     for path, dirs, files in this._cache:
+    #         if (path == dir) or (path == dir_to_search):
+    #             return (path, dirs, files)
+    #
+    #     return None
 
-    def _find_local(this, path):
-        dirs = []
-        files = []
+    # async def ls(this, path=None):
+    #     cp = this.current_path if path is None else path
+    #
+    #     listdir = (await this._find_dir_in_cache(cp)) if this.cached else (await this._find_local(cp))
+    #
+    #     if listdir is None:
+    #         return []
+    #
+    #     _, dirs, files = listdir
+    #
+    #     content = [this._make_local_filesystem_object(x, cp) for x in dirs + files]
+    #
+    #     # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
+    #
+    #     return content
 
-        path = this.new_path(path, this.root)
+    # def exists(this, filename: str):
+    #     p = this.visit(filename)
+    #
+    #     return os.path.exists(p.absolute_path)
 
-        try:
-            for itm in os.scandir(path.absolute_path):
-                if itm.is_dir():
-                    dirs.append(itm.name)
-                elif itm.is_file():
-                    files.append(itm.name)
+    # def get_file(this, path: AbstractPath) -> FileSystemObject:
+    #     p, name = os.path.split(path.relative_path)
+    #
+    #     if p == "":
+    #         p = "./"
+    #
+    #     return this._make_local_filesystem_object(name, p)
 
-            return (path.absolute_path, dirs, files)
-        except FileNotFoundError:
-            return None
-
-    def _find_dir_in_cache(this, dir):
-        dir_to_search = this.new_path(dir, root=this.base_path).relative_path
-        for path, dirs, files in this._cache:
-            if (path == dir) or (path == dir_to_search):
-                return (path, dirs, files)
-
-        return None
-
-    def ls(this, path=None):
-        cp = this.current_path if path is None else path
-
-        listdir = this._find_dir_in_cache(cp) if this.cached else this._find_local(cp)
-
-        if listdir is None:
-            return []
-
-        _, dirs, files = listdir
-
-        content = [this._make_local_filesystem_object(x, cp) for x in dirs + files]
-
-        # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
-
-        return content
-
-    def exists(this, filename):
-        p = this.visit(filename)
-
-        return os.path.exists(p.absolute_path)
-
-    def get_file(this, path: AbstractPath) -> FileSystemObject:
-        p, name = os.path.split(path.relative_path)
-
-        if p == "":
-            p = "./"
-
-        return this._make_local_filesystem_object(name, p)
-
-    def _make_local_filesystem_object(this, filename: str, path: str) -> FileSystemObject:
-        fullpath = this.new_path(AbstractPath.join(path, filename), root=this.root)
-
-        if (this.cached):
-            cached_fso = this._get_fso_from_cache(fullpath)
-            if (cached_fso is not None):
-                cached_fso.update_information()
-                return cached_fso
-
-        info = os.stat(fullpath.absolute_path)
-
-        type = FileType.OTHER
-
-        if stat.S_ISDIR(info.st_mode):
-            type = FileType.DIR
-        elif stat.S_ISREG(info.st_mode):
-            type = FileType.REGULAR
-
-        hidden = filename.startswith(".") or (
-                is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
-
-        fso = FileSystemObject(fullpath,
-                               type=type,
-                               size=info.st_size,
-                               mtime=datetime.fromtimestamp(info.st_mtime),
-                               exists=True,
-                               hidden=hidden)
-
-        if (this.cached):
-            this.set_file(fullpath, fso)
-
-        return fso
+    # def _make_local_filesystem_object(this, filename: str, path: str) -> FileSystemObject:
+    #     fullpath = this.new_path(AbstractPath.join(path, filename), root=this.root)
+    #
+    #     if (this.cached):
+    #         cached_fso = this._get_fso_from_cache(fullpath)
+    #         if (cached_fso is not None):
+    #             cached_fso.update_information()
+    #             return cached_fso
+    #
+    #     info = os.stat(fullpath.absolute_path)
+    #
+    #     type = FileType.OTHER
+    #
+    #     if stat.S_ISDIR(info.st_mode):
+    #         type = FileType.DIR
+    #     elif stat.S_ISREG(info.st_mode):
+    #         type = FileType.REGULAR
+    #
+    #     hidden = filename.startswith(".") or (
+    #             is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
+    #
+    #     fso = FileSystemObject(fullpath,
+    #                            type=type,
+    #                            size=info.st_size,
+    #                            mtime=datetime.fromtimestamp(info.st_mtime),
+    #                            exists=True,
+    #                            hidden=hidden)
+    #
+    #     if (this.cached):
+    #         this.set_file(fullpath, fso)
+    #
+    #     return fso
 
 
 class RemoteFileSystem(FileSystem):
@@ -1205,100 +1250,21 @@ class RemoteFileSystem(FileSystem):
 
         super().__init__(*args, **kwargs)
 
-    def _load(this):
-        this._cache = rclone.ls(this.base_path, args=["-R"])
-
-    def _find_dir_in_cache(this, dir):
-        dir_to_search = this.new_path(dir, root=this.base_path).relative_path
-
-        for itm in this._cache:
-            remote_path = "/" + itm['Path']
-            if (remote_path == dir) or (remote_path == dir_to_search):
-                return itm
-
-        return None
-
-    def _dir(this, path):
-        dir = []
-
-        # if (path.startswith("/")): path = path[1:]
-
-        items = this._cache if this.cached else rclone.ls(path.absolute_path)
-        relpath = path.relative_path
-
-        if (relpath == "."): relpath = ""
-
-        for itm in items:
-            p, tail = os.path.split(itm['Path'])
-
-            if (p == relpath):
-                dir.append(itm)
-
-        return dir
-
-    def ls(this, path=None):
-        cp = this.current_path if path is None else path
-        cp = this.new_path(cp, root=this.base_path)
-
-        content = [this._make_remote_filesystem_object(x, cp.relative_path) for x in this._dir(cp)]
-        # content = [f for f in content if all([fn(f) for fn in this.filter_callback])]
-
-        return content
-
-    def exists(this, filename):
-        p = this.visit(filename)
-
-        output = subprocess.run(
-            ["rclone", "size", p.absolute_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8"
-        )
-
-        return "not found" not in output.stderr
-
-    def get_file(this, path: AbstractPath) -> FileSystemObject:
-        p, name = os.path.split(path.relative_path)
-
-        parent_path = this.new_path(p)
-
-        content = this._dir(parent_path)
-
-        for itm in content:
-            if itm['Name'] == name:
-                return this._make_remote_filesystem_object(itm, parent_path.absolute_path)
-
-        raise FileNotFoundError(f"No such file or directory: '{path}'")
-
-    def _make_remote_filesystem_object(this, dic: dict, path: str):
-        type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
-
-        fullpath = this.new_path(AbstractPath.join(path, dic['Name']), root=this.root)
-
-        if (this.cached):
-            cached_fso = this._get_fso_from_cache(fullpath)
-            if (cached_fso is not None):
-                cached_fso.update_information()
-                return cached_fso
-
-        mod_time = _fix_isotime(dic['ModTime'])  # fixing mega.nz bug
-
-        fso = FileSystemObject(fullpath,
-                               type=type,
-                               size=dic['Size'],
-                               mtime=datetime.fromisoformat(mod_time),
-                               exists=True)
-
-        if this.cached:
-            this.set_file(fullpath, fso)
-
-        return fso
 
 
-def fs_auto_determine(path: str, parse_all: bool = False) -> FileSystem:
+
+
+async def fs_auto_determine(path: str, parse_all: bool = False) -> FileSystem:
+    '''
+    Automatically determine if the provided path is a local or remote root path
+
+    :param path: Path to self-determine
+    :param parse_all: Whether to parse the full path or just the parent directory (ie remove the last bit of the path)
+    :return: A FileSystem subtype
+    '''
     head, tail = os.path.split(path)
 
-    rclone_drives = [drive for _, drive in get_rclone_remotes()]
+    rclone_drives = [drive for _, drive in (await rclone_instance().list_remotes())]
     rclone_drives += [r.lower() for r in rclone_drives]
 
     partitions = rclone_drives.copy()
@@ -1314,25 +1280,23 @@ def fs_auto_determine(path: str, parse_all: bool = False) -> FileSystem:
 
     for p in partitions:
         if fullpath.startswith(p):
-            if (p in rclone_drives):
+            if p in rclone_drives:
                 return RemoteFileSystem(fullpath)
             else:
                 return LocalFileSystem(fullpath)
 
 
-def fs_autocomplete(path: str, min_chars: int = 3) -> str:
+async def fs_autocomplete(path: str, min_chars: int = 3) -> Union[str | None]:
     _, tail = os.path.split(path)
 
     if (len(tail) < min_chars):
         return None
 
-    fs = fs_auto_determine(path)
+    fs = await fs_auto_determine(path)
 
     if (fs is not None):
         fs.cached = False
-        ls = fs.ls()
-
-        # return str(ls)
+        ls = await fs.ls()
 
         for obj in ls:
             _, name = os.path.split(obj.absolute_path)
@@ -1340,13 +1304,25 @@ def fs_autocomplete(path: str, min_chars: int = 3) -> str:
             if name.startswith(tail):
                 return obj.absolute_path
 
+async def synched_walk(source:FileSystem, destination:FileSystem) \
+        -> AsyncIterable[Tuple[str,Union[FileSystemObject|None],Union[FileSystemObject|None]]]:
+    src_tree = { x.relative_path:x async for x in source.walk() }
+    dst_tree = {x.relative_path: x async for x in destination.walk()}
 
-def mkdir(path: FileSystemObject):
-    output = subprocess.run(
-        ["rclone", "mkdir", path.absolute_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf-8"
-    )
+    all_files = list ( set(src_tree.keys()) | set(dst_tree.keys()) )
 
-    return output.returncode == 0
+    all_files = sorted(all_files,key=_tree_sort_fn)
+
+    for path in all_files:
+        try:
+            src = src_tree[path]
+        except KeyError:
+            src = None
+
+        try:
+            dst = dst_tree[path]
+        except KeyError:
+            dst = None
+
+        yield path, src, dst
+

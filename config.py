@@ -35,7 +35,7 @@ def get_config_file() -> Path:
     """Generates the fullpath of the profile.json configuration file"""
     return user_config_path(PROGRAM_NAME).joinpath("profiles.json")
 
-def get_cache_file(obj:str) -> Path:
+def get_cache_file(obj:str) -> str:
     """
     Generates a cache filename for any object by making an md5 digest from the value returned by __hash__
     It doesn't create the file. Just a path to it

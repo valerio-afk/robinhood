@@ -26,25 +26,27 @@ from textual import on, work, events
 from textual.screen import ModalScreen
 from textual.app import App, Binding, Widget, ComposeResult
 from textual.suggester import Suggester
-from textual.worker import get_current_worker
+from textual.worker import get_current_worker, Worker, WorkerState
 from textual.containers import Container, Horizontal, Vertical
 from textual.events import DescendantBlur
+from textual.messages import ExitApp, Message
 from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
 from textual.widgets import TextArea,Switch
 from textual.widgets.data_table import Column
 from textual.renderables.bar import Bar
 from textual.coordinate import Coordinate
-from backend import SyncMode, RobinHoodBackend, compare_tree, ActionType, SyncEvent, kill_all_subprocesses
+from backend import SyncMode, RobinHoodBackend, ActionType, SyncEvent
+from new_backend import compare_tree
 from backend import ActionDirection, FileType, apply_changes, FileSystemObject, find_dedupe
 from synching import SyncProgress, AbstractSyncAction, SynchingManager, SyncStatus, SyncDirectionNotPermittedException
 from synching import CopySyncAction
 from commands import make_command
-from filesystem import get_rclone_remotes, AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine, sizeof_fmt
+from filesystem import AbstractPath, NTAbstractPath, fs_autocomplete, fs_auto_determine, sizeof_fmt, rclone_instance
 from datetime import datetime
 from fnmatch import fnmatch
 from config import RobinHoodConfiguration, RobinHoodProfile
-
 import re
+
 
 _SyncMethodsPrefix: Dict[SyncMode, str] = {
     SyncMode.UPDATE: ">>",
@@ -232,7 +234,7 @@ class FileSystemSuggester(Suggester):
         super().__init__(*args, **kwargs)
 
     async def get_suggestion(this, value: str) -> str | None:
-        x = fs_autocomplete(value)
+        x = await fs_autocomplete(value)
 
         return x
 
@@ -460,13 +462,18 @@ class RobinHoodRemoteList(Static):
     def __init__(this, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        this.remotes: List[Tuple[str, ...]] = get_rclone_remotes()
+        this.remotes: List[Tuple[str, ...]] = []
         this.border_title = "Remotes"
 
     def compose(this) -> ComposeResult:
         yield DataTable(cursor_type="row")
 
-    def on_mount(this) -> None:
+    async def on_mount(this) -> None:
+
+        if len(this.remotes)==0:
+            this.remotes = await rclone_instance().list_remotes()
+
+
         header = ("Type", "Drive")
         table = this.query_one(DataTable)
 
@@ -561,6 +568,14 @@ class PromptProfileNameModalScreen(ModalScreen):
             this.action_force_close()
 
 
+class StatusUpdate(Message):
+    def __init__(this, text:RenderableType, processed=None, total = None):
+        super().__init__()
+        this.text = text
+        this.processed = processed
+        this.total = total
+
+
 class RobinHood(App):
     CSS_PATH = "main_style.tcss"
     SCREENS = {"NewProfile": PromptProfileNameModalScreen(classes="modal-window")}
@@ -603,19 +618,17 @@ class RobinHood(App):
         this._update_job_related_interface()
 
     @on(DescendantBlur, "Input")
-    def on_blur_input(this, event: DescendantBlur) -> None:
-        this._validate_dir_inputs(event.widget)
+    async def on_blur_input(this, event: DescendantBlur) -> None:
+        await this._validate_dir_inputs(event.widget)
 
-    def _validate_dir_inputs(this, widget: Widget) -> bool:
+    async def _validate_dir_inputs(this, widget: Widget) -> bool:
         value: str = widget.value
         fail: bool = False
 
         try:
-            filesystem = fs_auto_determine(value, parse_all=True)
+            filesystem = await fs_auto_determine(value, parse_all=True)
             if filesystem is None:
                 fail = True
-            # else:
-            #     setattr(this,attr,filesystem)
         except FileNotFoundError:
             fail = True
 
@@ -656,7 +669,7 @@ class RobinHood(App):
     @property
     def is_synching(this) -> bool:
         for w in this.workers:
-            if (w.name == "synching") and not w.is_cancelled:
+            if (w.name == "synching") and (w.state == WorkerState.RUNNING):
                 return True
 
         return False
@@ -664,7 +677,7 @@ class RobinHood(App):
     @property
     def is_comparing(this) -> bool:
         for w in this.workers:
-            if (w.name == "comparison") and not w.is_cancelled:
+            if (w.name == "comparison") and (w.state == WorkerState.RUNNING):
                 return True
 
         return False
@@ -685,7 +698,7 @@ class RobinHood(App):
             if w.name in ["comparison", "synching"]:
                 w.cancel()
 
-    def _update_job_related_interface(this) -> None:
+    async def _update_job_related_interface(this) -> None:
         button = this.query_one("#work_launcher")
         enablable = this.query("#topbar Input, #topbar Select")
 
@@ -741,12 +754,22 @@ class RobinHood(App):
         this.profile.source_path = this.src
         this.profile.destination_path = this.dst
 
+    @on(ExitApp)
+    async def on_quit(this):
+        await rclone_instance().quit()
+
     @on(events.Ready)
-    def on_ready(this) -> None:
-        this._update_job_related_interface()
+    async def on_ready(this) -> None:
+        await this._update_job_related_interface()
+
+    @on(StatusUpdate)
+    async def update_status(this, event:StatusUpdate):
+        this.set_status(event.text)
+        if (event.processed is not None) and (event.total is not None):
+            this.update_progressbar(processed=event.processed, total=event.total)
 
     @on(DataTable.RowHighlighted)
-    def on_row_selected(this, event: DataTable.RowHighlighted) -> None:
+    async def on_row_selected(this, event: DataTable.RowHighlighted) -> None:
 
         if event.cursor_row >= 0:
             index = event.cursor_row  # int(event.row_key.value)
@@ -759,10 +782,8 @@ class RobinHood(App):
     async def work_launcher_pressed(this, event: Button.Pressed) -> None:
         if this.is_working:
             for w in this.workers:
-                if w.name in ["comparison", "synching"]:
+                if (w.name in ["comparison", "synching"]) and (w.state == WorkerState.RUNNING):
                     w.cancel()
-
-            kill_all_subprocesses()
 
             this.set_status("[bright_magenta]Operation stopped[/]")
         elif this._summary_pane.has_pending_actions:
@@ -786,12 +807,17 @@ class RobinHood(App):
             else:
                 this._run_comparison(this.syncmode)
 
-        this._update_job_related_interface()
+        #await this._update_job_related_interface()
 
-    @work(exclusive=True, name="comparison", thread=True)
+
+    async def on_worker_state_changed(this, event: Worker.StateChanged) -> None:
+        await this._update_job_related_interface()
+
+    @work(exclusive=True, name="comparison")
     async def _run_comparison(this, mode: SyncMode) -> None:
-        result = compare_tree(src=this.src, dest=this.dst, mode=mode, profile=this.profile, eventhandler=this._backend)
+        result = await compare_tree(src=this.src, dest=this.dst, mode=mode, profile=this.profile, eventhandler=this._backend)
         this.show_results(result)
+
 
     @work(exclusive=True, name="comparison", thread=True)
     def _run_dedupe(this) -> None:
@@ -802,11 +828,11 @@ class RobinHood(App):
     def _run_synch(this) -> None:
         apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
-    def update_progressbar(this, update: Union[SyncProgress | SyncEvent]):
-        if isinstance(update, SyncProgress):
-            this._progress_bar.update(total=update.bytes_total, progress=update.bytes_transferred)
-        elif isinstance(update, SyncEvent):
-            this._progress_bar.update(total=update.total, progress=update.processed)
+    def update_progressbar(this, processed, total):
+        # if isinstance(update, SyncProgress):
+        #     this._progress_bar.update(total=update.bytes_total, progress=update.bytes_transferred)
+        # elif isinstance(update, SyncEvent):
+        this._progress_bar.update(total=total, progress=processed)
 
     def show_results(this, results: Union[SynchingManager | None]) -> None:
         this._tree_pane.show_results(results)
@@ -875,34 +901,19 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def __init__(this, gui: RobinHood) -> None:
         this._gui = gui
 
-    def update_status(this, text: str) -> None:
-        this._gui.call_from_thread(this._gui.set_status, text)
-
-    def update_progressbar(this, update: [SyncProgress | SyncEvent]):
-        this._gui.call_from_thread(this._gui.update_progressbar, update)
+    def update_status(this, text: RenderableType, processed = None, total=None) -> None:
+        this._gui.post_message(StatusUpdate(text, processed, total))
 
     def update_table_row(this, action: AbstractSyncAction):
         this._gui.call_from_thread(this._gui.update_row_at, action)
 
-    def clean_up(this):
-        this._gui.call_from_thread(this._gui._kill_workers)
-        this._gui.call_from_thread(this._gui._update_job_related_interface)
-
-    def _check_running_status(this) -> None:
-        if (get_current_worker().is_cancelled):
-            raise InterruptedError()
-
     def before_comparing(this, event: SyncEvent) -> None:
-        this._check_running_status()
         this.update_status(f"Initiating directory analysis [underline yellow]{event.value}[/]")
 
     def on_comparing(this, event: SyncEvent) -> None:
-        this._check_running_status()
-        this.update_status(f"Analysing [underline yellow]{event.value}[/]")
-        this.update_progressbar(event)
+        this.update_status(f"Analysing [underline yellow]{event.value}[/]", processed=event.processed, total=event.total)
 
     def after_comparing(this, event: SyncEvent) -> None:
-        this.clean_up()
         this.update_status(f"[green]Directory comparison finished[/]")
 
     def before_synching(this, event: SyncEvent) -> None:
@@ -910,7 +921,6 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
 
     def on_synching(this, event: SyncEvent) -> None:
         # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
-        this._check_running_status()
 
         value = event.value
 

@@ -19,28 +19,36 @@
 # SOFTWARE.
 
 import json
+import asyncio
 from sys import stderr
 from argparse import Namespace, ArgumentParser
 from rich.panel import Panel
 from rich.console import Console
 from rich.table import Table
-from filesystem import get_rclone_remotes
 from text_app import RobinHood
 from backend import SyncMode
 from config import RobinHoodProfile, RobinHoodConfiguration, get_config_file
-from typing import Union
+from typing import Union, Callable
+
+import sys
+sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
+from pyrclone import rclone
 
 
-def rclone_remotes() -> None:
+def run_in_asyncio(func:Callable)->Callable:
+
+    def runner(*args,**kwargs):
+        asyncio.run(func(*args,**kwargs))
+
+    return runner
+@run_in_asyncio
+async def rclone_remotes(args:Namespace) -> None:
     '''
     Print on screen the list of remote directories configured on rclone
     '''
 
     # create a new console interface (rich)
     console = Console()
-
-    # get the list of remote directoris from rclone
-    remotes = get_rclone_remotes()
 
     # make a new table (with rich) with two columns
     table = Table(title="List of rclone remotes")
@@ -49,9 +57,10 @@ def rclone_remotes() -> None:
 
     # for each of the remote directories obtained from the
     # function above, a row is added to the table
-    for r in remotes:
-        if len(r) > 0:
-            table.add_row(*r)
+    async with rclone() as rc:
+        for r in await rc.list_remotes():
+            if len(r) > 0:
+                table.add_row(*r)
 
     # print the formatted table to the console
     console.print(table)

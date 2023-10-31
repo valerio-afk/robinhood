@@ -21,6 +21,8 @@
 # SOFTWARE.
 
 from __future__ import annotations
+
+import functools
 from typing import Union, List, Iterable, Callable, Dict, Tuple, Any
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
 from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine, AbstractPath
@@ -144,6 +146,15 @@ subprocess.Popen = _wrap_Popen(subprocess.Popen)
 
 # The extract_rclone_progress within rclone_python is replaced with my version
 rclone_python.rclone.utils.extract_rclone_progress = improved_extract_rclone_progress
+
+
+def _adapt_action_according_to_sync_mode(mode: SyncMode, manager: SynchingManager):
+    # Fix actions according to sync mode
+    match mode:
+        case SyncMode.UPDATE:
+            results_for_update(manager)
+        case SyncMode.MIRROR:
+            results_for_mirror(manager)
 
 
 
@@ -287,8 +298,8 @@ def compare_tree(src: Union[str | FileSystem],
         # add directory to the set of directories
         parent_directory = os.path.split(src_path.relative_path)[0]
 
-        #TODO: Change this with a SyncView
-        nested_actions = directories.setdefault(parent_directory, list())
+
+        nested_actions = directories.setdefault(parent_directory, SynchingManager.SyncManagerView(sync_changes, None))
 
         # By default, it's assumed that the standard way to transfer files is from source -> destination
         # Specific cases are treated below
@@ -370,17 +381,14 @@ def compare_tree(src: Union[str | FileSystem],
 
         action = SynchingManager.make_action(source_object, dest_object, type=type, direction=direction)
         sync_changes.add_action(action)
-        nested_actions.append(action)
+        nested_actions.add_key_from_action(action)
 
     # Filter results utilising user-defined filters
     filter_results(sync_changes, profile)
 
-    # Fix actions according to sync mode
-    match mode:
-        case SyncMode.UPDATE:
-            results_for_update(sync_changes)
-        case SyncMode.MIRROR:
-            results_for_mirror(sync_changes)
+    # Change action and/or direction(s) wrt the syncing mode
+    change_actions = functools.partial(_adapt_action_according_to_sync_mode, mode, sync_changes)
+    change_actions()
 
 
     for directory,nested_actions in directories.items():
@@ -392,33 +400,42 @@ def compare_tree(src: Union[str | FileSystem],
                                                )
                      )
 
-            a = FileSystemObject(src.new_path(directory),type=FileType.DIR, exists=True)
-            b = FileSystemObject(dest.new_path(directory), type=FileType.DIR, exists=True)
+            a = FileSystemObject(src.new_path(directory),type=FileType.DIR)
+            b = FileSystemObject(dest.new_path(directory), type=FileType.DIR)
 
             src_actual_files = 0
             dst_actual_files = 0
 
             for itm in nested_actions:
-                if not itm.excluded:
-                    if itm.a.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.DST2SRC):
-                        src_actual_files+=1
+                if itm.a.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.DST2SRC):
+                    src_actual_files+=1
 
-                    if itm.b.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.SRC2DST):
-                        dst_actual_files+=1
+                if itm.b.exists or (isinstance(itm,CopySyncAction) and itm.direction == ActionDirection.SRC2DST):
+                    dst_actual_files+=1
 
             # The following if-else is useful to get rid of empty directories
-            if (src_actual_files>0) and (dst_actual_files>0):
-                action = NoSyncAction(a, b)
-            else:
-                direction = ActionDirection.BOTH
 
-                if (src_actual_files>0) and (dst_actual_files==0):
-                    direction = ActionDirection.SRC2DST
-                elif (src_actual_files==0) and (dst_actual_files>0):
-                    direction = ActionDirection.DST2SRC
+            action = NoSyncAction(a, b)
 
-                action = DeleteSyncAction(a, b, direction)
+            # maybe a directory is empty. if so, let's delete it
 
+            a_exists = src.exists(a.relative_path)
+            a_empty = src.is_empty(a.relative_path)
+
+            b_exists = dest.exists(b.relative_path)
+            b_empty = dest.is_empty(b.relative_path)
+
+            delete_direction = None
+
+            if a_exists and a_empty and b_exists and not b_empty:
+                delete_direction = ActionDirection.BOTH
+            elif b_exists and b_empty:
+                delete_direction = ActionDirection.SRC2DST
+            elif a_exists and a_empty:
+                delete_direction = ActionDirection.DST2SRC
+
+            if delete_direction is not None:
+                action = DeleteSyncAction(a,b,direction=delete_direction)
 
             action.set_nested_actions(SynchingManager.SyncManagerView(
                 sync_changes,
@@ -432,6 +449,9 @@ def compare_tree(src: Union[str | FileSystem],
                 child.parent_action = parent_view
 
         processed_items += 1
+
+    # this function needs to be called again bc new actions for the directories has been added
+    change_actions()
 
     # Flush file info to cache
     src.flush_file_object_cache()
@@ -565,6 +585,8 @@ def results_for_update(sync_manager: SynchingManager) -> None:
                 # action.type = ActionType.NOTHING
                 # action.direction = None
                 sync_manager.cancel_action(action,in_place=True)
+            elif action.direction == ActionDirection.BOTH:
+                action.swap_direction()
             elif (src is not None) and (dest is not None):
                 if (action.type == ActionType.NOTHING):
                     if (src.size != dest.size):
@@ -592,6 +614,8 @@ def results_for_mirror(sync_manager: SynchingManager) -> None:
 
                 if new_action is not None:
                     sync_manager.replace(action, new_action)
+        elif action.direction == ActionDirection.BOTH:
+            action.swap_direction()
 
 
 def kill_all_subprocesses():

@@ -11,7 +11,13 @@ from enums import ActionDirection, SyncStatus, ActionType
 from events import SyncEvent, RobinHoodBackend
 from fnmatch import fnmatch
 import os.path
+import subprocess
 
+def rclone_rmdir(path: str):
+    rclone_command = ['rclone', 'rmdir', path]
+
+    report = subprocess.run(rclone_command, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
 
 def _parse_rclone_progress(actions: Iterable[AbstractSyncAction], sync_direction: ActionDirection,
                            output: Dict) -> SyncProgress:
@@ -248,7 +254,8 @@ class AbstractSyncAction(ABC):
         return this._nested_actions
 
     def swap_direction(this) -> None:
-        new_dir = ActionDirection.SRC2DST if this.direction == ActionDirection.DST2SRC else ActionDirection.DST2SRC
+
+        new_dir = ActionDirection.DST2SRC if this.direction == ActionDirection.SRC2DST else ActionDirection.SRC2DST
 
         fs = this.a if new_dir == ActionDirection.SRC2DST else this.b
 
@@ -398,12 +405,12 @@ class DeleteSyncAction(AbstractSyncAction):
 
         _trigger = _get_trigger_fn(eventhandler)
 
+        delete_fn = delete if FileType.REGULAR else rclone_rmdir
+
         if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
-            if this.a.type == FileType.REGULAR:
-                delete(this.a.absolute_path)
+            delete_fn(this.a.absolute_path)
         if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
-            if this.b.type == FileType.REGULAR:
-                delete(this.b.absolute_path)
+            delete_fn(this.b.absolute_path)
 
         this._check_success()
 
@@ -433,7 +440,7 @@ class DeleteSyncAction(AbstractSyncAction):
         this._status = SyncStatus.SUCCESS if success else SyncStatus.FAILED
 
     def swap_direction(this) -> None:
-        new_dir = ActionDirection.SRC2DST if this.direction == ActionDirection.DST2SRC else ActionDirection.DST2SRC
+        new_dir = ActionDirection.DST2SRC if this.direction == ActionDirection.SRC2DST else ActionDirection.SRC2DST
 
         fs = this.a if new_dir == ActionDirection.DST2SRC else this.b
 
@@ -451,11 +458,14 @@ class SynchingManager():
 
     class SyncManagerView(Iterable[AbstractSyncAction]):
 
-        def __init__(this, mng:SynchingManager, keys:Iterable[int]):
-            curr_keys = mng._changes.keys()
-
-            this._indices = set([k for k in keys if k in curr_keys])
+        def __init__(this, mng:SynchingManager, keys:Union[Iterable[int]|None]):
             this._manager = mng
+
+            this._indices = set()
+
+            if keys is not None:
+                for id in keys:
+                    this.add_key(id)
 
         def __iter__(this):
             removed_ids = []
@@ -470,8 +480,17 @@ class SynchingManager():
             for id in removed_ids:
                 this._indices.remove(id)
 
-        def __len__(this):
+        def __len__(this) -> int:
             return len(this._indices)
+
+        def add_key(this, key:int) -> None:
+            if key in this._manager._changes.keys():
+                this._indices.add(key)
+
+        def add_key_from_action(this, action:AbstractSyncAction) -> None:
+            idx = this._manager.index_of(action)
+            this._indices.add(idx)
+
         @classmethod
         def from_actions(cls, mng:SynchingManager, actions:List[AbstractSyncAction]) -> SynchingManager.SyncManagerView:
             indices = [k for k,v in mng if v in actions]
