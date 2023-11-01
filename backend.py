@@ -29,7 +29,7 @@ from filesystem import FileType, FileSystemObject, FileSystem, fs_auto_determine
 from file_filters import UnixPatternExpasionFilter, RemoveHiddenFileFilter, FilterSet, FileFilter
 from rclone_python.rclone import copy
 from config import RobinHoodProfile
-from synching import SynchingManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
+from synching import SynchManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
 from synching import CopySyncAction, DeleteSyncAction
 from events import SyncEvent, RobinHoodBackend
 import os
@@ -148,7 +148,7 @@ subprocess.Popen = _wrap_Popen(subprocess.Popen)
 rclone_python.rclone.utils.extract_rclone_progress = improved_extract_rclone_progress
 
 
-def _adapt_action_according_to_sync_mode(mode: SyncMode, manager: SynchingManager):
+def _adapt_action_according_to_sync_mode(mode: SyncMode, manager: SynchManager):
     # Fix actions according to sync mode
     match mode:
         case SyncMode.UPDATE:
@@ -180,7 +180,7 @@ def find_dedupe(path: Union[str | FileSystem],
 
     fs.load()
 
-    manager = SynchingManager(fs)
+    manager = SynchManager(fs)
     size_organiser = {}
 
     for fso in fs.walk():
@@ -199,7 +199,7 @@ def find_dedupe(path: Union[str | FileSystem],
             b = fs_objs[j]
 
             if a.checksum == b.checksum:
-                action = SynchingManager.make_action(a,b,type=ActionType.DELETE, direction=ActionDirection.SRC2DST)
+                action = SynchManager.make_action(a, b, type=ActionType.DELETE, direction=ActionDirection.SRC2DST)
                 manager.add_action(action)
 
     _trigger("after_comparing", SyncEvent(manager))
@@ -213,7 +213,7 @@ def compare_tree(src: Union[str | FileSystem],
                  mode: SyncMode.UPDATE,
                  profile: RobinHoodProfile,
                  eventhandler: [RobinHoodBackend | None] = None
-                 ) -> SynchingManager:
+                 ) -> SynchManager:
     """
     Compare two directories and return differences according to the provided synching modality
     :param src: Source directory
@@ -255,7 +255,7 @@ def compare_tree(src: Union[str | FileSystem],
                             stderr=subprocess.PIPE)
 
     # Parse the result obtained  from rclone
-    sync_changes = SynchingManager(src , dest)
+    sync_changes = SynchManager(src, dest)
 
     files = report.stdout.decode().splitlines()
 
@@ -299,7 +299,7 @@ def compare_tree(src: Union[str | FileSystem],
         parent_directory = os.path.split(src_path.relative_path)[0]
 
 
-        nested_actions = directories.setdefault(parent_directory, SynchingManager.SyncManagerView(sync_changes, None))
+        nested_actions = directories.setdefault(parent_directory, SynchManager.SyncManagerView(sync_changes, None))
 
         # By default, it's assumed that the standard way to transfer files is from source -> destination
         # Specific cases are treated below
@@ -379,7 +379,7 @@ def compare_tree(src: Union[str | FileSystem],
                         direction = ActionDirection.SRC2DST if source_object.mtime > dest_object.mtime else ActionDirection.DST2SRC
                         type = ActionType.UPDATE
 
-        action = SynchingManager.make_action(source_object, dest_object, type=type, direction=direction)
+        action = SynchManager.make_action(source_object, dest_object, type=type, direction=direction)
         sync_changes.add_action(action)
         nested_actions.add_key_from_action(action)
 
@@ -437,13 +437,13 @@ def compare_tree(src: Union[str | FileSystem],
             if delete_direction is not None:
                 action = DeleteSyncAction(a,b,direction=delete_direction)
 
-            action.set_nested_actions(SynchingManager.SyncManagerView(
+            action.set_nested_actions(SynchManager.SyncManagerView(
                 sync_changes,
                 [sync_changes.index_of(itm) for itm in nested_actions]
             ))
 
             parent_key = sync_changes.add_action(action)
-            parent_view = SynchingManager.SyncManagerView(sync_changes, [parent_key])
+            parent_view = SynchManager.SyncManagerView(sync_changes, [parent_key])
 
             for child in action.get_nested_actions():
                 child.parent_action = parent_view
@@ -478,7 +478,7 @@ def compare_tree(src: Union[str | FileSystem],
     return sync_changes
 
 
-def apply_changes(changes: SynchingManager,
+def apply_changes(changes: SynchManager,
                   eventhandler: [RobinHoodBackend | None] = None,
                   show_progress:bool=False
                   ) -> None:
@@ -511,7 +511,7 @@ def apply_changes(changes: SynchingManager,
                                                      direction=ActionDirection.DST2SRC)
 
         # A list containing all the remaining actions that couldn't be bulked
-        other_actions = SynchingManager(changes.source, changes.destination)
+        other_actions = SynchManager(changes.source, changes.destination)
 
         # Check each action if it could be put inside one of the two copy bulks
         for itm in changes.changes:
@@ -547,7 +547,7 @@ def apply_changes(changes: SynchingManager,
     _trigger("after_synching", SyncEvent())
 
 
-def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
+def filter_results(changes: SynchManager, profile: RobinHoodProfile):
     exclusion_filters = profile.exclusion_filters
     filters: List[FileFilter] = []
 
@@ -571,11 +571,8 @@ def filter_results(changes: SynchingManager, profile: RobinHoodProfile):
                     xx = changes.cancel_action(nested_action,True)
                     xx.excluded = True
 
-        # for idx in actions_to_remove:
-        #     changes.remove_action(idx)
 
-
-def results_for_update(sync_manager: SynchingManager) -> None:
+def results_for_update(sync_manager: SynchManager) -> None:
     for _,action in sync_manager:
         if not action.excluded:
             src = action.a
@@ -596,7 +593,7 @@ def results_for_update(sync_manager: SynchingManager) -> None:
                             new_action = CopySyncAction(action.a, action.b, direction=ActionDirection.SRC2DST)
                             sync_manager.replace(action, new_action)
 
-def results_for_mirror(sync_manager: SynchingManager) -> None:
+def results_for_mirror(sync_manager: SynchManager) -> None:
     for _,action in sync_manager:
         src = action.a
         dest = action.b

@@ -1,11 +1,11 @@
 import asyncio
-from typing import Union
+from typing import Union, List
 from enums import SyncMode, SyncStatus, ActionType, ActionDirection
 from config import RobinHoodProfile
 from filesystem import FileSystemObject, FileSystem, fs_auto_determine,  rclone_instance, synched_walk
-from synching import SynchingManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
+from file_filters import FileFilter, UnixPatternExpasionFilter, RemoveHiddenFileFilter, FilterSet
+from synching import SynchManager, BulkCopySynchingManager, _get_trigger_fn, AbstractSyncAction, NoSyncAction
 from events import SyncEvent, RobinHoodBackend
-
 
 
 async def compare_tree(src: Union[str | FileSystem],
@@ -13,7 +13,7 @@ async def compare_tree(src: Union[str | FileSystem],
                  mode: SyncMode.UPDATE,
                  profile: RobinHoodProfile,
                  eventhandler: [RobinHoodBackend | None] = None
-                 ) -> SynchingManager:
+                 ) -> SynchManager:
     """
     Compare two directories and return differences according to the provided synching modality
     :param src: Source directory
@@ -39,28 +39,56 @@ async def compare_tree(src: Union[str | FileSystem],
         dest = await fs_auto_determine(dest,True)
         dest.cached = True
 
+
+    # load file system cache
+
     await src.load()
     await dest.load()
 
 
     # Parse the result obtained  from rclone
-    sync_changes = SynchingManager(src, dest)
+    sync_changes = SynchManager(src, dest)
+
+    # Set file filters
+
+    exclusion_filters = profile.exclusion_filters
+    filters: List[FileFilter] = []
+
+    if exclusion_filters is not None:
+        filters = [UnixPatternExpasionFilter(pattern) for pattern in profile.exclusion_filters]
+
+    if profile.exclude_hidden_files:
+        filters.append(RemoveHiddenFileFilter())
 
 
+    filter_set = FilterSet(*filters)
+
+
+    # Get list of directories/files from both sides
     tree = [x async for x in synched_walk(src,dest)]
     processed_items = 0
+
 
     for path, a, b in tree:
         _trigger("on_comparing", SyncEvent(path, processed=processed_items, total=len(tree) ) )
 
+        direction = ActionDirection.BOTH
+        type = ActionType.NOTHING
+
         if a is None:
+            # file doesn't exist in source, copy to it
+            #TODO: unless it's been deleted
             a = FileSystemObject(fullpath=src.new_path(path),
                                  type=b.type,
                                  size=None,
                                  mtime=None,
                                  exists=False,
                                  hidden=b.hidden)
+            direction = ActionDirection.DST2SRC
+            type = ActionType.COPY
         elif b is None:
+            # file doesn't exist in destination, copy to it
+            # TODO: unless it's been deleted
             b = FileSystemObject(fullpath=dest.new_path(path),
                                  type=a.type,
                                  size=None,
@@ -68,14 +96,34 @@ async def compare_tree(src: Union[str | FileSystem],
                                  exists=False,
                                  hidden=a.hidden)
 
+            direction = ActionDirection.SRC2DST
+            type = ActionType.COPY
+        else:
+            #file exists in both side, let's see which one is newer
+            if a.size != b.size:
+                type = ActionType.COPY
 
-        action = SynchingManager.make_action(a,b,ActionType.NOTHING,ActionDirection.SRC2DST)
+                if a.mtime.timestamp() > b.mtime.timestamp():
+                    direction = ActionDirection.SRC2DST
+                else:
+                    direction = ActionDirection.DST2SRC
+
+        # At this point, we will have both a & b for sure (no matter whether they exist or not)
+        # This means I can filter them out if necessary
+
+        excluded = filter_set.filter(a) or filter_set.filter(b)
+
+        if excluded:
+            type = ActionType.NOTHING
+
+        action = SynchManager.make_action(a, b, type, direction, excluded = excluded)
 
         sync_changes.add_action(action)
 
         processed_items+=1
         await asyncio.sleep(0)
 
+    await sync_changes.make_all_actions_consistend()
 
     _trigger("after_comparing", SyncEvent(sync_changes))
     return sync_changes

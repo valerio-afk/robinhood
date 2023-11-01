@@ -3,3 +3,4 @@ textual==0.38.1
 psutil==5.9.5
 platformdirs==3.11.0
 aiofiles==23.2.1
+bigtree[pandas]==0.14.3
