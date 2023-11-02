@@ -116,7 +116,24 @@ async def compare_tree(src: Union[str | FileSystem],
         if excluded:
             type = ActionType.NOTHING
 
+        match mode:
+            case SyncMode.UPDATE: # any action destination-to-source is not considered
+                if direction == ActionDirection.DST2SRC:
+                    type = ActionType.NOTHING
+                    direction = ActionDirection.SRC2DST
+                elif direction == ActionDirection.BOTH:
+                    direction = ActionDirection.SRC2DST
+            case SyncMode.MIRROR:
+                if direction == ActionDirection.DST2SRC:
+                    if not a.exists:
+                        action = ActionType.DELETE
+                    else:
+                        action = ActionType.COPY
+
+                    direction = ActionDirection.SRC2DST
+
         action = SynchManager.make_action(a, b, type, direction, excluded = excluded)
+
 
         sync_changes.add_action(action)
 
@@ -124,6 +141,10 @@ async def compare_tree(src: Union[str | FileSystem],
         await asyncio.sleep(0)
 
     await sync_changes.make_all_actions_consistend()
+
+    # Flush file info to cache
+    await src.flush_file_object_cache()
+    await dest.flush_file_object_cache()
 
     _trigger("after_comparing", SyncEvent(sync_changes))
     return sync_changes

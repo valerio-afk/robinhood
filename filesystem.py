@@ -31,7 +31,6 @@ from psutil import disk_partitions
 from config import get_cache_file
 from time import sleep
 import os
-import stat
 import subprocess
 import json
 import aiofiles
@@ -1107,7 +1106,7 @@ class FileSystem(ABC):
         """
         return this._path_manager(path, root if root is not None else this.root)
 
-    def flush_file_object_cache(this) -> None:
+    async def flush_file_object_cache(this) -> None:
         """
         Flushes changes of the file system objects into cache
         """
@@ -1121,10 +1120,11 @@ class FileSystem(ABC):
             previous = this.get_previous_version(current.fullpath)
 
             if (previous is not None) and (current is not None):
-                if (previous.mtime.timestamp() == current.mtime.timestamp()) and \
-                        (previous.size == current.size) and \
-                        previous.has_checksum and (not current.has_checksum):
-                    current.checksum = previous.checksum
+                if (previous.type == FileType.REGULAR) and (current.type==FileType.REGULAR):
+                    if (previous.mtime.timestamp() == current.mtime.timestamp()) and \
+                            (previous.size == current.size) and \
+                            previous.has_checksum and (not current.has_checksum):
+                        current.checksum = previous.checksum
 
         keys = sorted(this._file_objects_cache.keys(), key=lambda path: (len(AbstractPath.split(path)), path))
 
@@ -1137,12 +1137,13 @@ class FileSystem(ABC):
         if not os.path.exists(parent):
             os.makedirs(parent, exist_ok=True)
 
-        with open(cache_filename, "w") as h:
-            json.dump({
+        async with aiofiles.open(cache_filename, mode="w") as h:
+            content = json.dumps({
                 "root": this.root,
                 "timestamp": datetime.now().timestamp(),
                 "files": fsos
-            }, h)
+            })
+            await h.write(content)
 
 
 class LocalFileSystem(FileSystem):
