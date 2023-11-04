@@ -20,7 +20,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Union, List, Type, Iterable, Dict, AsyncIterable, Tuple
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -458,18 +457,16 @@ class FileSystemObject:
         """Gets the file- or directory name of the fs object"""
         return os.path.split(this.absolute_path)[1]
 
-    @property
     async def is_remote(this) -> bool:
         """
         Checks if the fs object is rooted in a remote drive (doesn't check if it exists remotely)
         :return: TRUE if it's in any of the remote drives, FALSE otherwise
         """
-        async for _, drive in rclone_instance().list_remotes():
+        for _, drive in (await rclone_instance().list_remotes()):
             if this.absolute_path.startswith(drive):
                 return True
         return False
 
-    @property
     async def is_local(this) -> bool:
         """
         Checks if the fs object is rooted in a local drive (doesn't check if it exists remotely)
@@ -487,8 +484,8 @@ class FileSystemObject:
         if (not this.exists) or (this.type == FileType.DIR):
             return None
 
-        if (this._size is None) or (this._size < 0):
-            this.update_information()
+        # if (this._size is None) or (this._size < 0):
+        #     this.update_information()
 
         return this._size
 
@@ -499,33 +496,33 @@ class FileSystemObject:
         :return: TRUE if the object exists, FALSE otherwise
         '''
 
-        if this._exists is None:
-            this.update_information()
+        # if this._exists is None:
+        #     this.update_information()
 
         return this._exists
 
     @property
     def mtime(this) -> Union[datetime | None]:
         """Gets the modification time of the filesystem object"""
-        if this._mtime is None:
-            this.update_information()
+        # if this._mtime is None:
+        #     this.update_information()
 
         return this._mtime
 
-    @property
-    def is_empty(this) -> bool:
-        if this.type != FileType.DIR:
-            raise TypeError("Cannot determine the emptiness of something that is not a directory")
-
-        if this._is_empty is not None:
-            return this._is_empty
-
-        p = subprocess.run(['rclone', 'ls', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output = p.stdout.decode().strip()
-
-        this._is_empty = (p.returncode == 0) and (len(output) == 0)
-
-        return this._is_empty
+    # @property
+    # def is_empty(this) -> bool:
+    #     if this.type != FileType.DIR:
+    #         raise TypeError("Cannot determine the emptiness of something that is not a directory")
+    #
+    #     if this._is_empty is not None:
+    #         return this._is_empty
+    #
+    #     p = subprocess.run(['rclone', 'ls', this.absolute_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    #     output = p.stdout.decode().strip()
+    #
+    #     this._is_empty = (p.returncode == 0) and (len(output) == 0)
+    #
+    #     return this._is_empty
 
     @mtime.setter
     def mtime(this, mtime: Union[datetime | None]) -> None:
@@ -545,17 +542,6 @@ class FileSystemObject:
         if this.type == FileType.DIR:
             return None
 
-        if not this.has_checksum:
-            args = ["rclone", "hashsum", "md5", this.absolute_path]
-
-            if this.is_remote:
-                args.append(["--download"])
-
-            output = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            if output.returncode == 0:
-                this._checksum = output.stdout.decode().split(" ")[0]
-
         return this._checksum
 
     @checksum.setter
@@ -567,6 +553,16 @@ class FileSystemObject:
         :return:
         """
         this._checksum = value
+
+
+    async def get_checksum(this) -> Union[str | None]:
+        if this.type == FileType.DIR:
+            return None
+
+        if this.checksum is None:
+            this.checksum = await rclone_instance().checksum(this.absolute_path,remote = await this.is_remote())
+
+        return this.checksum
 
     def __eq__(this, other) -> bool:
         if type(other) == str:
@@ -585,24 +581,19 @@ class FileSystemObject:
     def __repr__(this) -> str:
         return str(this)
 
-    def update_information(this) -> None:
+    async def update_information(this) -> None:
         """Update the information about the file system object, eg size, modificafion time and its existance"""
 
         # Using rclone is the best way to have this information formated in the  same way, regardless if we have a local
         # or remote file/directory
-        output = subprocess.run(['rclone', 'lsjson', this.absolute_path], stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
+        stat = await rclone_instance().stat(this.fullpath.root, this.fullpath.relative_path)
 
         # If rclone returns code is non-zero, then the object doesn't exist
-        if output.returncode == 0:
+        if stat is not None:
             # If it does exist, then the new information are used to update the current object status
-            file_stats = json.loads(output.stdout.decode())
-
-            for s in file_stats:
-                if s['Name'] == this.filename:
-                    this._size = s['Size']
-                    this.mtime = datetime.fromisoformat(_fix_isotime(s['ModTime']))
-                    this._exists = True
+            this._size = stat['Size']
+            this.mtime = datetime.fromisoformat(_fix_isotime(stat['ModTime']))
+            this._exists = True
         else:
             this._exists = False
 

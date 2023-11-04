@@ -19,7 +19,7 @@
 # SOFTWARE.
 
 from __future__ import annotations
-from typing import Tuple, List, Union, ClassVar, Iterable, Set
+from typing import Tuple, List, Union, Iterable
 from rich.text import Text
 from rich.console import RenderableType
 from textual import on, work, events
@@ -31,15 +31,32 @@ from textual.events import DescendantBlur
 from textual.messages import ExitApp, Message
 from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
 from textual.widgets import TextArea,Switch
-from backend import SyncMode, RobinHoodBackend, ActionType, SyncEvent
-from new_backend import compare_tree
-from backend import  apply_changes, find_dedupe
-from synching import SyncProgress, AbstractSyncAction, SynchManager, SyncStatus
+from events import RobinHoodBackend, SyncEvent
+from enums import SyncMode
+from new_backend import compare_tree, find_dedupe, apply_changes
+from synching import AbstractSyncAction, SynchManager
 from commands import make_command
 from filesystem import NTAbstractPath,  fs_auto_determine, rclone_instance
 from config import RobinHoodConfiguration, RobinHoodProfile
 from widgets import ComparisonSummary, DisplayFilters, FileDetailsSummary, RobinHoodTopBar, DirectoryComparisonDataTable
+from datetime import timedelta
+import re
 
+def _get_eta(seconds:int) -> str:
+    delta = timedelta(seconds=seconds)
+    m = re.match(r"(([0-9]+) days,[\s]*)?([0-9]{1,2})\:([0-9]{1,2})\:([0-9]{1,2})", str(delta))
+
+    days, hh, mm, dd, = m[2], m[3], m[4], m[5]
+
+    eta = ""
+    if days is not None:
+        eta += f"{days}d"
+
+    eta += f"{hh}h"
+    eta += f"{mm}m"
+    eta += f"{dd}d"
+
+    return eta
 
 class RobinHoodRemoteList(Static):
     def __init__(this, *args, **kwargs):
@@ -328,7 +345,11 @@ class RobinHood(App):
             button.variant = "error"
             button.label = "Stop"
 
-            this.show_progressbar = this.is_comparing
+            if this.is_working:
+                this.show_progressbar = True
+                this.update_progressbar()
+            else:
+                this.show_progressbar = False
 
             for x in enablable:
                 x.disabled = True
@@ -371,6 +392,10 @@ class RobinHood(App):
         this.set_status(event.text)
         if (event.processed is not None) and (event.total is not None):
             this.update_progressbar(processed=event.processed, total=event.total)
+
+    @on(DirectoryComparisonDataTable.ActionRefreshed)
+    async def update_row(this, event: DirectoryComparisonDataTable.ActionRefreshed):
+        this._tree_pane.update_action(event.action)
 
     @on(DataTable.RowHighlighted)
     async def on_row_selected(this, event: DataTable.RowHighlighted) -> None:
@@ -415,7 +440,11 @@ class RobinHood(App):
 
 
     async def on_worker_state_changed(this, event: Worker.StateChanged) -> None:
+        if (event.worker.name == 'synching') and (event.state in [WorkerState.CANCELLED, WorkerState.ERROR]):
+            await rclone_instance().stop_pending_jobs
+
         await this._update_job_related_interface()
+
 
     @work(exclusive=True, name="comparison")
     async def _run_comparison(this, mode: SyncMode) -> None:
@@ -423,16 +452,16 @@ class RobinHood(App):
         await this.show_results(result)
 
 
-    @work(exclusive=True, name="comparison", thread=True)
-    def _run_dedupe(this) -> None:
-        result = find_dedupe(this.src, this._backend)
-        this.call_from_thread(this.show_results, result)
+    @work(exclusive=True, name="comparison")
+    async def _run_dedupe(this) -> None:
+        result = await find_dedupe(this.src, this._backend)
+        await this.show_results(result)
 
-    @work(exclusive=True, name="synching", thread=True)
-    def _run_synch(this) -> None:
-        apply_changes(this._tree_pane.changes, eventhandler=this._backend)
+    @work(exclusive=True, name="synching")
+    async def _run_synch(this) -> None:
+        await apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
-    def update_progressbar(this, processed, total):
+    def update_progressbar(this, processed:float=0, total:Union[float|None]=None):
         # if isinstance(update, SyncProgress):
         #     this._progress_bar.update(total=update.bytes_total, progress=update.bytes_transferred)
         # elif isinstance(update, SyncEvent):
@@ -442,9 +471,6 @@ class RobinHood(App):
         await this._tree_pane.show_results(results)
         this._summary_pane.results = results
         await this._update_job_related_interface()
-
-    def update_row_at(this, action: AbstractSyncAction):
-        this._tree_pane.update_action(action)
 
     def compose(this) -> ComposeResult:
         this.screen.title = "🏹 Robin Hood"
@@ -508,8 +534,9 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def update_status(this, text: RenderableType, processed = None, total=None) -> None:
         this._gui.post_message(StatusUpdate(text, processed, total))
 
-    def update_table_row(this, action: AbstractSyncAction):
-        this._gui.call_from_thread(this._gui.update_row_at, action)
+    def update_table_row(this, action: AbstractSyncAction) -> None:
+        #this._gui.call_from_thread(this._gui.update_row_at, action)
+        this._gui.post_message(DirectoryComparisonDataTable.ActionRefreshed(action))
 
     def before_comparing(this, event: SyncEvent) -> None:
         this.update_status(f"Initiating directory analysis [underline yellow]{event.value}[/]")
@@ -523,58 +550,89 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
     def before_synching(this, event: SyncEvent) -> None:
         this.update_status(f"Initiating synchronisation ...")
 
-    def on_synching(this, event: SyncEvent) -> None:
-        # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
-
+    def on_synching(this, event:SyncEvent) -> None:
         value = event.value
 
-        if isinstance(value, AbstractSyncAction):
-            this.update_table_row(value)
+        if (type(value) is not list) or (len(value) == 0):
+            return
 
-        elif isinstance(value, SyncProgress):
-            update = value
+        total_size = 0
+        total_transferred = 0
+        total_speed = 0
 
-            # Format information about transfer speed
-            transf_speed = f"[green]{update.transfer_speed} {update.transfer_speed_unit}[/green]"
+        for action in value:
+            update = action.update
+            total_size += update.size
+            total_transferred += update.transferred_bytes
+            total_speed += update.average_speed
 
-            if (update.prog_transferring is not None):
-                # If the action is just one, I can show more specific information about it
-                if len(update.prog_transferring) == 1:
-                    action = update.prog_transferring[0]
+            this.update_table_row(action)
 
-                    # Get the relative path from either src or dest (it shouldn't matter - it's just for displaying purposes)
-                    p = action.get_one_path.relative_path
+        if total_speed>0:
+            remaining_secs = (total_size - total_transferred) / total_speed
+            eta = _get_eta(int(remaining_secs))
+        else:
+            eta = ""
 
-                    # Update the status bar if it's either started or in progress
-                    if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
-                        # Gets a precise label wrt the current action
-                        match action.type:
-                            case ActionType.DELETE:
-                                desc_action = "Deleting"
-                            case ActionType.UPDATE | ActionType.COPY:
-                                desc_action = "Copying"
-                            case _:
-                                desc_action = "Doing something with"  # this case should never happen right?
+        status = f"Transferring {len(value)} file(s) [yellow]{total_speed}[/] [cyan]{eta}[/]"
+        this.update_status(status,processed=total_transferred,total=total_size)
 
-                        # Compose the string to be displayed in the TUI
-                        desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
 
-                        # Update the status label in the TUI
-                        this.update_status(desc)
 
-                        # Update the row in the table
-                        this.update_table_row(action)
-                else:  # This means more files are processes that the same time (bulk operations)
 
-                    for itm in update.prog_transferring:
-                        # Update the corresponding
-                        this.update_table_row(itm)
 
-                    desc = f"Processing [bold]{len(update.prog_transferring)}[/] file(s) {transf_speed}"
-                    this.update_status(desc)
+
+    # def on_synching(this, event: SyncEvent) -> None:
+    #     # Check if the thread has been cancelled. This happens when the user click on the "Stop" Button
+    #
+    #     value = event.value
+    #
+    #     if isinstance(value, AbstractSyncAction):
+    #         this.update_table_row(value)
+    #
+    #     elif isinstance(value, SyncProgress):
+    #         update = value
+    #
+    #         # Format information about transfer speed
+    #         transf_speed = f"[green]{update.transfer_speed} {update.transfer_speed_unit}[/green]"
+    #
+    #         if (update.prog_transferring is not None):
+    #             # If the action is just one, I can show more specific information about it
+    #             if len(update.prog_transferring) == 1:
+    #                 action = update.prog_transferring[0]
+    #
+    #                 # Get the relative path from either src or dest (it shouldn't matter - it's just for displaying purposes)
+    #                 p = action.get_one_path.relative_path
+    #
+    #                 # Update the status bar if it's either started or in progress
+    #                 if action.status in [SyncStatus.NOT_STARTED, SyncStatus.IN_PROGRESS]:
+    #                     # Gets a precise label wrt the current action
+    #                     match action.type:
+    #                         case ActionType.DELETE:
+    #                             desc_action = "Deleting"
+    #                         case ActionType.UPDATE | ActionType.COPY:
+    #                             desc_action = "Copying"
+    #                         case _:
+    #                             desc_action = "Doing something with"  # this case should never happen right?
+    #
+    #                     # Compose the string to be displayed in the TUI
+    #                     desc = f"{desc_action} [yellow]{p}[/] {transf_speed}"
+    #
+    #                     # Update the status label in the TUI
+    #                     this.update_status(desc)
+    #
+    #                     # Update the row in the table
+    #                     this.update_table_row(action)
+    #             else:  # This means more files are processes that the same time (bulk operations)
+    #
+    #                 for itm in update.prog_transferring:
+    #                     # Update the corresponding
+    #                     this.update_table_row(itm)
+    #
+    #                 desc = f"Processing [bold]{len(update.prog_transferring)}[/] file(s) {transf_speed}"
+    #                 this.update_status(desc)
 
     def after_synching(this, event: SyncEvent) -> None:
-        this.clean_up()
         this.update_status(f"[green]Synchronisation finished[/]")
 
         cmd = make_command(this._gui.profile.on_completion)

@@ -26,7 +26,7 @@ from rich.panel import Panel
 from rich.console import Console
 from rich.table import Table
 from text_app import RobinHood
-from backend import SyncMode
+from enums import SyncMode
 from config import RobinHoodProfile, RobinHoodConfiguration, get_config_file
 from typing import Union, Callable
 

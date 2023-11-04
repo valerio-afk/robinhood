@@ -101,7 +101,7 @@ def _render_action_as_copy_action(action: AbstractSyncAction, *,
         progress_update = action.get_update()
 
         if progress_update is not None:
-            p = progress_update.progress / 100
+            p = progress_update.percentage
             c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
 
     return c1,c2,c3
@@ -445,6 +445,16 @@ class DirectoryComparisonDataTable(DataTable):
 
     class TableRefreshed(Event):
         ...
+
+    class ActionRefreshed(Event):
+
+        def __init__(this, action:AbstractSyncAction):
+            super().__init__()
+            this._action = action
+
+        @property
+        def action(this) -> AbstractSyncAction:
+            return this._action
 
     def __init__(this, *args, **kwargs):
         kwargs["cursor_type"] = "row"
