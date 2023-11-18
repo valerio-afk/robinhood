@@ -98,11 +98,13 @@ def _render_action_as_copy_action(action: AbstractSyncAction, *,
     c1,c2,c3 = columns
 
     if action.status == SyncStatus.IN_PROGRESS:
-        progress_update = action.get_update()
+        update = action.get_update()
 
-        if progress_update is not None:
-            p = progress_update.percentage
-            c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
+        if update is not None:
+            progress_update = update.stats
+            if progress_update is not None:
+                p = progress_update.percentage
+                c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
 
     return c1,c2,c3
 
@@ -670,12 +672,12 @@ class DirectoryComparisonDataTable(DataTable):
     def clear_selections(this) -> None:
         this._selected_actions.clear()
 
-    def action_select_all(this) -> None:
+    async def action_select_all(this) -> None:
         this._selected_actions = list(range(0,len(this._displayed_actions)))
-        this.refresh_table()
-    def action_clear_selections(this) -> None:
+        await this.refresh_table()
+    async def action_clear_selections(this) -> None:
         this.clear_selections()
-        this.refresh_table()
+        await this.refresh_table()
     def action_toggle_selection(this):
         # get the action highlighted by the cursor - ie the one the user wants to change
         idx = this.cursor_row

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from random import randint
 from abc import ABC, abstractmethod
 from typing import List, Any, Union, Callable, Dict, Iterable, AsyncIterable
-from datetime import datetime
-from dataclasses import dataclass
+
 from filesystem import AbstractPath
 from filesystem import convert_to_bytes, FileSystemObject, FileSystem, FileType
 from enums import ActionDirection, SyncStatus, ActionType
@@ -15,7 +15,7 @@ from bigtree import Node, add_dict_to_tree_by_path, preorder_iter, postorder_ite
 import sys
 sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
 from pyrclone import rclone
-from pyrclone.jobs import RCloneTransferJob, RCJobStatus, RCloneTransferDetails
+from pyrclone.jobs import RCJobStatus, RCloneTransferDetails
 
 
 def _get_trigger_fn(eventhandler: Union[SyncEvent | None] = None) -> Callable[[str, SyncEvent], None]:
@@ -30,18 +30,7 @@ def _get_trigger_fn(eventhandler: Union[SyncEvent | None] = None) -> Callable[[s
     return _trigger
 
 
-# class SyncComparisonEvent(SyncEvent):
-#
-#     def __init__(this, src_path=None, dest_path=None):
-#         super().__init__((src_path, dest_path))
-#
-#     @property
-#     def source_path(this):
-#         return this.value[0]
-#
-#     @property
-#     def destination_path(this):
-#         return this.value[1]
+
 
 
 class SyncDirectionNotPermittedException(Exception):
@@ -66,28 +55,24 @@ class AbstractSyncAction(ABC):
         this._validate_action_direction()
 
     @property
-    def type(this):
+    def type(this) -> ActionType:
         return this._type
 
     @property
-    def direction(this):
+    def direction(this) -> ActionDirection:
         return this._direction
-
-    @property
-    def get_one_path(this) -> FileSystemObject:
-        return this.a if this.b is None else this.b
 
     @property
     def status(this) -> SyncStatus:
         return this._status
 
     @property
-    def update(this) -> Union[RCloneTransferJob | None]:
+    def update(this) -> Union[RCJobStatus | None]:
         return this.get_update()
 
-    # @update.setter
-    # def update(this, value):
-    #     this._update = value
+    @property
+    def is_folder(this) -> bool:
+        return (this.a.type == FileType.DIR) or (this.b.type == FileType.DIR)
 
     @abstractmethod
     async def apply_action(this, rclone_engine: rclone) -> None:
@@ -139,7 +124,7 @@ class AbstractSyncAction(ABC):
 
         this._direction = this.direction.BOTH
 
-    def get_update(this) -> Union[RCloneTransferJob | None]:
+    def get_update(this) -> Union[RCJobStatus | None]:
         return this._update
 
     def __str__(this) -> str:
@@ -196,6 +181,9 @@ class CopySyncAction(AbstractSyncAction):
         if this.excluded:
             return
 
+        if this._jobid is not None:
+            return
+
         src_root = this.a.fullpath.root
         src_path = this.a.fullpath.relative_path
 
@@ -206,27 +194,33 @@ class CopySyncAction(AbstractSyncAction):
             src_root, dst_root = dst_root, src_root
             src_path, dst_path = dst_path, src_path
 
-        if (this.a.type == FileType.REGULAR) and (this.b.type == FileType.REGULAR):
+        if not this.is_folder:
             this._jobid = await rclone_engine.copy_file(src_root, src_path, dst_root, dst_path)
 
     async def update_status(this, rclone_engine:rclone) -> None:
-        if this._jobid in rclone_engine.jobid_to_be_started:
-            this._status = SyncStatus.NOT_STARTED
-        else:
-            async for j in rclone_engine.started_jobs:
-                if j.id == this._jobid:
-                    if j.status == RCJobStatus.IN_PROGRESS:
-                        this._update = await rclone_engine.get_transfer_status(this._jobid)
-                        this._status = SyncStatus.IN_PROGRESS
-                        return
-                    elif j.status == RCJobStatus.FINISHED:
-                        this._status = SyncStatus.SUCCESS
-                        return
-                    else:
-                        this._status = SyncStatus.FAILED
-                        return
 
-            this._status = SyncStatus.SUCCESS
+        if this._jobid is not None:
+            timeout = True
+
+            async for id,status in rclone_engine.jobs:
+                if id == this._jobid:
+                    match status:
+                        case RCJobStatus.NOT_STARTED:
+                            this._status = SyncStatus.NOT_STARTED
+                        case RCJobStatus.IN_PROGRESS:
+                            this._status = SyncStatus.IN_PROGRESS
+                        case RCJobStatus.FINISHED:
+                            this._status = SyncStatus.SUCCESS
+                        case RCJobStatus.FAILED:
+                            this._status = SyncStatus.FAILED
+
+                    this._update = rclone_engine.get_last_status_update(this._jobid)
+
+
+        else:
+            if this.is_folder:
+                this._status = SyncStatus.SUCCESS
+
 
 
 class DeleteSyncAction(AbstractSyncAction):
@@ -315,36 +309,11 @@ class SynchManager:
     def __len__(this) -> int:
         return this._length
 
-    # def __getitem__(this, item: int) -> AbstractSyncAction:
-    #     return this._changes[item]
-
-    # def __contains__(this, action: AbstractSyncAction) -> bool:
-    #     return action in this._changes
 
     @property
     async def changes(this) -> AsyncIterable[AbstractSyncAction]:
         for action in this:
             yield action
-
-    # def index_of(this, action: AbstractSyncAction) -> Union[int|None]:
-    #     """
-    #     Returns the position of the provided action within the manager
-    #
-    #     :param action: the action to retrieve its position
-    #     """
-    #
-    #     for k,v in this._changes.items():
-    #         if v == action:
-    #             return k
-    #
-    #     return None
-
-    # def clear(this) -> None:
-    #     this._changes = []
-    #
-    # def remove_action(this, idx:int) -> None:
-    #     del this._changes[idx]
-    #     this._length-=1
 
     def add_action(this, action: AbstractSyncAction) -> int:
         src_path = this.source.root
@@ -427,43 +396,30 @@ class SynchManager:
     async def apply_changes(this, rclone_manager: rclone, eventhandler: [SyncEvent | None] = None) -> None:
         _trigger = _get_trigger_fn(eventhandler)
 
-        submitted_actions = []
+        manager = TransferManager(rclone_manager,max_transfers=4)
+
         async for x in this.changes:
-            if (not isinstance(x, NoSyncAction)) and (x.status != SyncStatus.SUCCESS) and (not x.excluded):
-                await x.apply_action(rclone_manager)
-                submitted_actions.append(x)
+            manager.append(x)
 
-        has_pending_actions = True
-        while has_pending_actions:
-            has_pending_actions = False
+        while not (await manager.has_finished()):
+            await manager.attempt_job_submission()
+            active_actions = [x async for x in manager.actions]
+            if len(active_actions) > 0:
+                _trigger("on_synching", SyncEvent(active_actions))
 
-            action_still_in_progress = []
-
-            for a in submitted_actions:
-                await a.update_status(rclone_manager)
-
-                if a.status == SyncStatus.IN_PROGRESS:
-                    has_pending_actions = True
-                    action_still_in_progress.append(a)
-                elif a.status == SyncStatus.NOT_STARTED:
-                    has_pending_actions = True
-
-            _trigger("on_synching", SyncEvent(action_still_in_progress))
-
-
-        for a in submitted_actions:
+        async for a in manager.actions_finished:
             this.flush_action(a)
 
-        this._flush_cache()
+        await this._flush_cache()
 
-    def _flush_cache(this) -> None:
+    async def _flush_cache(this) -> None:
         """
         Flushes the file system cache into the disk (JSON file) after changes have been applied
         """
-        this.source.flush_file_object_cache()
+        await  this.source.flush_file_object_cache()
 
         if this.destination is not None:
-            this.destination.flush_file_object_cache()
+            await this.destination.flush_file_object_cache()
 
     def flush_action(this, action: AbstractSyncAction) -> None:
         """
@@ -618,6 +574,117 @@ class SynchManager:
         action.excluded = excluded
 
         return action
+
+
+class TransferManager:
+
+    def __init__(this, rclone:rclone, max_transfers:int = 4):
+        this._max_transfers = 0
+        this._actions:List[AbstractSyncAction] = []
+        this._rclone = rclone
+
+        this.max_transfers = max_transfers
+
+    @property
+    def max_transfers(this) -> int:
+        return this._max_transfers
+
+    @max_transfers.setter
+    def max_transfers(this, value:int) -> None:
+        this._max_transfers = value
+
+    async def filter_by_status(this, status:SyncStatus):
+        async for action in this.actions:
+            if action.status == status:
+                yield action
+
+    @property
+    async def actions(this) -> AsyncIterable:
+        for action in this._actions:
+            await action.update_status(this._rclone)
+            yield action
+
+
+    @property
+    async def queued_actions(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.filter_by_status(SyncStatus.NOT_STARTED):
+            yield action
+
+    @property
+    async def actions_in_progress(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.filter_by_status(SyncStatus.IN_PROGRESS):
+            yield action
+
+    @property
+    async def actions_successful(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.filter_by_status(SyncStatus.SUCCESS):
+            yield action
+
+    @property
+    async def actions_failed(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.filter_by_status(SyncStatus.FAILED):
+            yield action
+
+    @property
+    async def actions_finished(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.actions_successful:
+            yield action
+
+        async for action in this.actions_failed:
+            yield action
+
+
+    @property
+    async def active_actions(this) -> AsyncIterable[AbstractSyncAction]:
+        async for action in this.queued_actions:
+            yield action
+
+        async for action in this.actions_in_progress:
+            yield action
+
+
+    async def has_finished(this) -> bool:
+        async for _ in this.queued_actions:
+            return False
+
+        async for _ in this.actions_in_progress:
+            return False
+
+        return True
+
+
+    async def current_capacity(this) -> int:
+        max = this.max_transfers
+
+        async for _ in this.actions_in_progress:
+            max-=1
+
+        return max if max>=0 else 0
+
+    async def attempt_job_submission(this):
+        capacity = await this.current_capacity()
+
+        if capacity > 0:
+            async for action in this.queued_actions:
+                if capacity > 0 :
+                    await action.apply_action(this._rclone)
+                    capacity-=1
+
+            await asyncio.sleep(0.5)
+
+
+    def append(this, action:AbstractSyncAction) -> None:
+        if (not isinstance(action, NoSyncAction)) and (action.status != SyncStatus.SUCCESS) and (not action.excluded):
+            this._actions.append(action)
+
+    def remove(this, action:AbstractSyncAction) -> None:
+        del this[action]
+    def __delitem__(this, action:AbstractSyncAction) -> None:
+        idx = this._actions.index(action)
+        del this._actions[idx]
+
+
+
 
 
 

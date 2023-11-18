@@ -37,4 +37,3 @@ class SyncStatus(Enum):
     IN_PROGRESS : int = 1
     SUCCESS     : int = 2
     FAILED      : int = 3
-    INTERRUPTED : int = 4

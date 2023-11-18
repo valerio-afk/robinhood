@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Union, List, Type, Iterable, Dict, AsyncIterable, Tuple
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -52,11 +53,9 @@ def rclone_instance() -> rclone:
     if not hasattr(rclone_instance, "_instance"):
         # TODO: use auth
         rclone_instance._instance = rclone().run()
-        sleep(0.5)
+        time.sleep(0.5)
 
     return rclone_instance._instance
-
-
 
 
 def sizeof_fmt(num: int, suffix: str = "B") -> str:
@@ -841,11 +840,11 @@ class FileSystem(ABC):
         cp = this.current_path if path is None else path
         cp = this.new_path(cp, root=this.base_path)
 
-        content = [this._make_filesystem_object(x, cp.relative_path) for x in (await this._dir(cp))]
+        content = [await this._make_filesystem_object(x, cp.relative_path) for x in (await this._dir(cp))]
 
         return content
 
-    def _make_filesystem_object(this, dic: dict, path: str) -> FileSystemObject:
+    async def _make_filesystem_object(this, dic: dict, path: str) -> FileSystemObject:
         type = FileType.DIR if dic['IsDir'] else FileType.REGULAR
 
         fullpath = this.new_path(AbstractPath.join(path, dic['Name']), root=this.root)
@@ -853,7 +852,7 @@ class FileSystem(ABC):
         if (this.cached):
             cached_fso = this._get_fso_from_cache(fullpath)
             if (cached_fso is not None):
-                cached_fso.update_information()
+                await cached_fso.update_information()
                 return cached_fso
 
         mod_time = _fix_isotime(dic['ModTime'])  # fixing mega.nz bug
@@ -898,7 +897,7 @@ class FileSystem(ABC):
 
         return await rclone_instance().exists(p.root,p.relative_path)
 
-    def get_file(this, path: AbstractPath) -> FileSystemObject:
+    async def get_file(this, path: AbstractPath) -> FileSystemObject:
         """
         Returns a FileSystemObject from path. The FileSystemObject contains useful information about the file/directory
         :param path: The path to get information from
@@ -908,11 +907,11 @@ class FileSystem(ABC):
 
         parent_path = this.new_path(p)
 
-        content = this._dir(parent_path)
+        content = await this._dir(parent_path)
 
         for itm in content:
             if itm['Name'] == name:
-                return this._make_filesystem_object(itm, parent_path.absolute_path)
+                return await this._make_filesystem_object(itm, parent_path.absolute_path)
 
         raise FileNotFoundError(f"No such file or directory: '{path}'")
 
