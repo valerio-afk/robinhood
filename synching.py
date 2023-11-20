@@ -435,7 +435,7 @@ class SynchManager:
         match action.type:
             case ActionType.COPY | ActionType.UPDATE:
                 side = this.destination if action.direction == ActionDirection.SRC2DST else this.source
-                fso = action.b if action.direction == ActionDirection.SRC2DST else action.a
+                fso = action.a if action.direction == ActionDirection.SRC2DST else action.b
 
                 if fso.type == FileType.REGULAR:
                     side.set_file(fso.fullpath, fso)

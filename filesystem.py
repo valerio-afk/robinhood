@@ -597,6 +597,7 @@ class FileSystemObject:
             this._exists = False
 
     def to_dict(this) -> Dict[str, Any]:
+        print()
         return {
             "path": this.relative_path,
             "type": this.type.value,
