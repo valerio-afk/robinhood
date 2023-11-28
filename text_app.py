@@ -459,6 +459,10 @@ class RobinHood(App):
 
     @work(exclusive=True, name="synching")
     async def _run_synch(this) -> None:
+        cfg = RobinHoodConfiguration()
+
+        this._tree_pane.changes.max_transfers = cfg.current_profile.parallel_transfers
+
         await apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
     def update_progressbar(this, processed:float=0, total:Union[float|None]=None):

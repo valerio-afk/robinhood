@@ -77,6 +77,7 @@ class RobinHoodProfile:
     name: Union[str | None] = None
     source_path: Union[str|None]=None
     destination_path: Union[str|None]=None
+    parallel_transfers: int = 4
     exclusion_filters:Union[List[str] | None] = None
     deep_comparisons:bool = False
     exclude_hidden_files:bool = False
@@ -84,17 +85,19 @@ class RobinHoodProfile:
     sync_mode:SyncMode = SyncMode.UPDATE
 
     def __str__(this)->str:
-        return f"Source Path ....: {this.source_path}\n"\
-               f"Destination Path: {this.destination_path}\n"\
-               f"Deep search ....: {this.deep_comparisons}\n"\
-               f"Filters ........: {this.exclusion_filters}\n"\
-               f"Exclude hidden .: {this.exclude_hidden_files}\n"\
-               f"On completion ..: {this.on_completion}"
+        return f"Source Path ......: {this.source_path}\n"\
+               f"Destination Path .: {this.destination_path}\n"\
+               f"Parallel Transfers: {this.parallel_transfers}\n"\
+               f"Deep search ......: {this.deep_comparisons}\n"\
+               f"Filters ..........: {this.exclusion_filters}\n"\
+               f"Exclude hidden ...: {this.exclude_hidden_files}\n"\
+               f"On completion ....: {this.on_completion}"
 
     def to_json(this):
         return {
             "source_path": this.source_path,
             "destination_path": this.destination_path,
+            "parallel_transfers": this.parallel_transfers,
             "exclusion_filters": this.exclusion_filters,
             "deep_comparisons": this.deep_comparisons,
             "exclude_hidden_files": this.exclude_hidden_files,

@@ -21,14 +21,14 @@
 import json
 import asyncio
 from sys import stderr
-from argparse import Namespace, ArgumentParser
+from argparse import Namespace, ArgumentParser, ArgumentTypeError
 from rich.panel import Panel
 from rich.console import Console
 from rich.table import Table
 from text_app import RobinHood
 from enums import SyncMode
 from config import RobinHoodProfile, RobinHoodConfiguration, get_config_file
-from typing import Union, Callable
+from typing import Union, Callable, Any
 
 import sys
 sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
@@ -224,6 +224,7 @@ def action_profiles(args: Namespace) -> None:
         profile = RobinHoodProfile(
             source_path=args.local,
             destination_path=args.remote,
+            parallel_transfers=args.parallel_transfers,
             deep_comparisons=args.deep,
             exclusion_filters=args.exclude,
             exclude_hidden_files=args.exclude_hidden,
@@ -246,8 +247,10 @@ def action_profiles(args: Namespace) -> None:
 
             if args.local is not None: profile.source_path = args.local
             if args.remote is not None: profile.destination_path = args.remote
+            if args.parallel_transfers is not None : profile.parallel_transfers = args.parallel_transfers
             if args.exclude is not None: profile.exclusion_filters = args.exclude
             if args.on_completion is not None: profile.on_completion = args.on_completion
+
 
             if (args.deep):
                 profile.deep_comparisons = True
@@ -298,6 +301,15 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
                                 Useful to create/edit a profile
     '''
 
+
+    def positive_int(value:Any) -> Any:
+        val = int(value)
+
+        if (val<=0):
+            raise ArgumentTypeError(f"You must provide a positive value greater than 0")
+
+        return val
+
     parser.add_argument("local",
                         type=str,
                         help="Local path",
@@ -319,6 +331,14 @@ def add_sync_args(parser: ArgumentParser, include_remote: bool = True, extend_bi
                         help="List of patterns to exclude")
 
     parser.add_argument("--clear-cache",action="store_true",dest="clear_cache",help="Clear file tree structure cache")
+
+    parser.add_argument("-t",
+                                    "--parallel",
+                                    action="store",
+                                    metavar="N",
+                                    type=positive_int,
+                                    dest="parallel_transfers",
+                                    help="Number of parallel transfers")
 
     deep_search_group = parser.add_mutually_exclusive_group()
     hidden_files_group = parser.add_mutually_exclusive_group()

@@ -297,6 +297,8 @@ class SynchManager:
         this._idx = 0
         this._length = 0
 
+        this.max_transfers = 4
+
         this._changes = Node(name=".")
 
     def __iter__(this) -> Iterable[AbstractSyncAction]:
@@ -394,7 +396,7 @@ class SynchManager:
     async def apply_changes(this, rclone_manager: rclone, eventhandler: [SyncEvent | None] = None) -> None:
         _trigger = _get_trigger_fn(eventhandler)
 
-        manager = TransferManager(rclone_manager,max_transfers=4)
+        manager = TransferManager(rclone_manager,max_transfers=this.max_transfers)
 
         async for x in this.changes:
             manager.append(x)
@@ -577,11 +579,9 @@ class SynchManager:
 class TransferManager:
 
     def __init__(this, rclone:rclone, max_transfers:int = 4):
-        this._max_transfers = 0
+        this._max_transfers = max_transfers
         this._actions:List[AbstractSyncAction] = []
         this._rclone = rclone
-
-        this.max_transfers = max_transfers
 
     @property
     def max_transfers(this) -> int:
@@ -680,110 +680,3 @@ class TransferManager:
     def __delitem__(this, action:AbstractSyncAction) -> None:
         idx = this._actions.index(action)
         del this._actions[idx]
-
-
-
-
-
-
-# class BulkCopySynchingManager(SynchManager):
-#
-#     def __init__(this,
-#                  source: FileSystem,
-#                  destination: FileSystem,
-#                  direction: ActionDirection):
-#
-#         super().__init__(source, destination)
-#
-#         this._direction = direction
-#         this._actions_in_progress = []
-#
-#     def add_action(this, action: AbstractSyncAction) -> None:
-#
-#         if action.type not in [ActionType.COPY, ActionType.UPDATE]:
-#             raise ValueError("The provided action is not copying or updating a file")
-#
-#         if (action.direction != this._direction):
-#             raise ValueError("The provided action is towards a different synching direction")
-#
-#         super().add_action(action)
-#
-#     def apply_changes(this, show_progress: bool = False, eventhandler: [SyncEvent | None] = None) -> None:
-#         '''
-#         Applies bulk copy/update actions to destionation directory
-#         :param show_progress: A boolean representing whether to show the progress bar or not (useful for batch processes)
-#         :param eventhandler: A class extending RobinHoodBackend (where events will be passed to)
-#         '''
-#
-#         # Gets the function that facilitate the triggering of events in the eventhandler (if provided)
-#         _trigger = _get_trigger_fn(eventhandler)
-#
-#         def _update_internal_status(d: Dict) -> None:
-#             '''
-#             This internal function is used as callback function for the rclone_python copy function
-#             The updates coming from there are formatted and passed to the right SyncAction object
-#             :param d: Dictionary of updates as provided by rclone
-#             '''
-#
-#             # Creates an object to format the dictionary provided by rclone_python with the current transfer update
-#             sync_update = _parse_rclone_progress(this.changes, this._direction, d)
-#
-#             for current_action in sync_update.prog_transferring:
-#                 # Let's check if this action is a new one (this means that we are either at the very
-#                 # beginning or an action finished (either successfully or not)
-#
-#                 if current_action not in this._actions_in_progress:
-#                     # As this is an action that just started, its status is updated
-#                     current_action.status = SyncStatus.IN_PROGRESS
-#                     # And gets inside the club of actions in progress
-#                     this._actions_in_progress.append(current_action)
-#
-#             for x in this._actions_in_progress:
-#                 # if some actions have a time before the current_time value, it means that it doesn't
-#                 # appear in the stdout of rclone, ie it's done (no matter if it's successful or not)
-#                 if (x.update.timestamp < sync_update.timestamp):
-#                     x._check_success()
-#                     # Notify that this action is concluded
-#                     _trigger("on_synching", SyncEvent(x))
-#
-#                     # Flush changes into file system
-#                     this.flush_action(x)
-#
-#             # Filter out all the terminated actions
-#             this._actions_in_progress = [x for x in this._actions_in_progress if x.status == SyncStatus.IN_PROGRESS]
-#
-#             # Notify that these actions are still in progress and send them as a list
-#             _trigger("on_synching", SyncEvent(sync_update))
-#
-#         tmp_dir = site_cache_path()
-#         tmp_fname = f"rh_sync_tmp_{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.txt"
-#
-#         path = os.path.join(tmp_dir, tmp_fname)
-#
-#         with open(path, "w") as handle:
-#             for x in this.changes:
-#                 if not x.excluded:
-#                     fso = x.a if this._direction == ActionDirection.SRC2DST else x.b
-#                     if fso.type == FileType.REGULAR:
-#                         handle.write(f"{fso.relative_path}\n")
-#
-#         a = this.source.root
-#         b = this.destination.root
-#
-#         if this._direction == ActionDirection.DST2SRC:
-#             a, b = b, a
-#
-#         copy(a,
-#              b,
-#              show_progress=show_progress,
-#              listener=_update_internal_status,
-#              args=['--files-from', path, '--no-check-dest', '--no-traverse'])
-#
-#         # Better double-checking again when it's done if everything has been copied successfully
-#         for itm in this.changes:
-#             if (itm.status in [SyncStatus.IN_PROGRESS, SyncStatus.NOT_STARTED]) and (not itm.excluded):
-#                 itm._check_success()
-#                 _trigger("on_synching", SyncEvent(itm))
-#                 this.flush_action(itm)
-#
-#         this._flush_cache()

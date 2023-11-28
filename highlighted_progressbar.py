@@ -16,7 +16,7 @@ class HighlightedProgressBar:
         if size is not None:
             assert size>0 , "The size of the progress bar must be greater than 0"
         else:
-            size = this._console.width
+            size = this.console.width
 
         this.bgStyle:Style = background
         this.barStyle:Style = bar
@@ -57,13 +57,13 @@ class HighlightedProgressBar:
 
     def render(this) -> RenderableType:
         actual_text = this.label.replace("%%",f"{int(this.get_percentage*100)}%")
-        text = Text(text=actual_text, no_wrap=True,style=this.bgStyle,end="")
+        text = Text(text=actual_text, no_wrap=True,end="", )
 
-
+        padding = 2
         length = len(actual_text)
 
         if length < this.width:
-            pad = this.width - length
+            pad = this.width - length - padding
 
             match this.alignment:
                 case "center":
@@ -75,18 +75,26 @@ class HighlightedProgressBar:
                 case "right":
                     text.pad_left(pad)
 
-        text.truncate(this.width, overflow="ellipsis", pad=True)
 
-        completed_characters = this.get_percentage * this.width
+        text.truncate(this.width - padding, overflow="ellipsis", pad=True)
+
+        completed_characters = this.get_percentage * (this.width-padding)
         n = int(completed_characters)
         next_char_perc = completed_characters - n
 
+
         text.stylize(this.barStyle,end=n)
 
-        if (completed_characters < this.width) and (next_char_perc>=0.5):
+        if (completed_characters < (this.width-padding)) and (next_char_perc>=0.5):
             text.stylize(this.cursorStyle,n,n+1)
 
-        return text
+        progress_bar = Text(text="│")
+        progress_bar.append_text(text)
+        progress_bar.append_text(Text(text="│"))
+
+        progress_bar.style = this.bgStyle
+
+        return progress_bar
 
     def print(this):
         this.console.print(this.render(),end="")
@@ -99,7 +107,7 @@ if __name__ == "__main__":
     pb.console.show_cursor(False)
 
     for i in range(0,pb.total):
-        pb.advance(1,"Prova [%%]")
+        pb.advance(10,"Prova [%%]")
         pb.print()
         print("\r",end="")
         time.sleep(1)

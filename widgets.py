@@ -9,7 +9,6 @@ from textual.reactive import reactive
 from textual.widgets import Switch, Input, Label, Static, Button, Select, DataTable
 from textual.widgets.data_table import Column
 from textual.containers import Horizontal, Container
-#from textual.renderables.bar import Bar
 from highlighted_progressbar import HighlightedProgressBar
 from textual.app import Widget, ComposeResult, Binding
 from textual.coordinate import Coordinate
@@ -81,7 +80,9 @@ def _render_action(action: AbstractSyncAction) -> Tuple[RenderableType, Renderab
 
 def _render_action_as_no_action(action: AbstractSyncAction) -> Tuple[RenderableType, RenderableType, RenderableType]:
     c1, _, c3 = _render_action(action)
-    return (c1, "-", c3)
+    c2 = "-"
+
+    return (c1, c2, c3)
 
 
 def _render_action_as_copy_action(action: AbstractSyncAction, *,
