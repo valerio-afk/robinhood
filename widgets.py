@@ -9,7 +9,8 @@ from textual.reactive import reactive
 from textual.widgets import Switch, Input, Label, Static, Button, Select, DataTable
 from textual.widgets.data_table import Column
 from textual.containers import Horizontal, Container
-from textual.renderables.bar import Bar
+#from textual.renderables.bar import Bar
+from highlighted_progressbar import HighlightedProgressBar
 from textual.app import Widget, ComposeResult, Binding
 from textual.coordinate import Coordinate
 from synching import (SynchManager,
@@ -104,7 +105,16 @@ def _render_action_as_copy_action(action: AbstractSyncAction, *,
             progress_update = update.stats
             if progress_update is not None:
                 p = progress_update.percentage
-                c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
+                progress_bar = HighlightedProgressBar(1,width)
+
+                label = None
+
+                if (action.update is not None) and (action.update.stats is not None):
+                    label = sizeof_fmt(action.update.stats.average_speed) + "/s"
+
+                progress_bar.update(p,label)
+                c2 = progress_bar.render()
+                #c2 = Bar((0, width * p), highlight_style="green1", background_style="dark_green")
 
     return c1,c2,c3
 

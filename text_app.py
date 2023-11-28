@@ -560,6 +560,8 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
         total_transferred = 0
         total_speed = 0
 
+        finished = 0
+
         for action in value:
             if (not action.is_folder) and (action.type in [ActionType.COPY, ActionType.UPDATE]):
                 filesize = action.a.size if action.direction == ActionDirection.SRC2DST else action.b.size
@@ -580,6 +582,7 @@ class RobinHoodGUIBackendMananger(RobinHoodBackend):
                     case SyncStatus.SUCCESS:
                         total_size += filesize
                         total_transferred += filesize
+                        finished +=1
 
 
             this.update_table_row(action)

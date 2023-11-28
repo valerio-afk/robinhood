@@ -31,8 +31,6 @@ def _get_trigger_fn(eventhandler: Union[SyncEvent | None] = None) -> Callable[[s
 
 
 
-
-
 class SyncDirectionNotPermittedException(Exception):
     ...
 
