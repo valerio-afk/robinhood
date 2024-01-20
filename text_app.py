@@ -33,7 +33,7 @@ from textual.widgets import Header, Footer, Static, Input, Button, Select, DataT
 from textual.widgets import TextArea,Switch
 from events import RobinHoodBackend, SyncEvent
 from enums import SyncMode
-from new_backend import compare_tree, find_dedupe, apply_changes
+from backend import compare_tree, find_dedupe, apply_changes
 from synching import AbstractSyncAction, SynchManager, SyncStatus, ActionType, ActionDirection
 from commands import make_command
 from filesystem import NTAbstractPath,  fs_auto_determine, rclone_instance, sizeof_fmt
@@ -412,6 +412,9 @@ class RobinHood(App):
         if this.is_working:
             for w in this.workers:
                 if (w.name in ["comparison", "synching"]) and (w.state == WorkerState.RUNNING):
+                    if this._tree_pane.changes is not None:
+                        await this._tree_pane.changes.abort()
+
                     w.cancel()
 
             this.set_status("[bright_magenta]Operation stopped[/]")
@@ -440,10 +443,10 @@ class RobinHood(App):
 
 
     async def on_worker_state_changed(this, event: Worker.StateChanged) -> None:
-        if (event.worker.name == 'synching') and (event.state in [WorkerState.CANCELLED, WorkerState.ERROR]):
-            await rclone_instance().stop_pending_jobs()
-
-        await this._update_job_related_interface()
+        # if (event.worker.name == 'synching') and (event.state in [WorkerState.CANCELLED, WorkerState.ERROR]):
+        #     await this._tree_pane.changes.abort()
+    #
+         await this._update_job_related_interface()
 
 
     @work(exclusive=True, name="comparison")

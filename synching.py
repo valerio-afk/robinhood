@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from random import randint
 from abc import ABC, abstractmethod
-from typing import List, Any, Union, Callable, Dict, Iterable, AsyncIterable
-
+from typing import List,  Union, Callable,  Iterable, AsyncIterable
 from filesystem import AbstractPath
-from filesystem import convert_to_bytes, FileSystemObject, FileSystem, FileType
+from filesystem import  FileSystemObject, FileSystem, FileType
 from enums import ActionDirection, SyncStatus, ActionType
 from events import SyncEvent, RobinHoodBackend
 from bigtree import Node, add_dict_to_tree_by_path, preorder_iter, postorder_iter, find_path
+from pyrclone.pyrclone import rclone, RCJobStatus
+from aiohttp import ClientOSError
 
-
-import sys
-sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
-from pyrclone import rclone
-from pyrclone.jobs import RCJobStatus, RCloneTransferDetails
 
 
 def _get_trigger_fn(eventhandler: Union[SyncEvent | None] = None) -> Callable[[str, SyncEvent], None]:
@@ -51,6 +46,7 @@ class AbstractSyncAction(ABC):
         this._status = SyncStatus.NOT_STARTED
 
         this._validate_action_direction()
+
 
     @property
     def type(this) -> ActionType:
@@ -125,6 +121,16 @@ class AbstractSyncAction(ABC):
     def get_update(this) -> Union[RCJobStatus | None]:
         return this._update
 
+
+    def retry(this):
+        """
+        This method allows to retry transfering an action that has failed
+        """
+
+        if this.status == SyncStatus.FAILED:
+            this._status = SyncStatus.NOT_STARTED
+            this._update = None
+
     def __str__(this) -> str:
         action_type = this._repr_type()
 
@@ -165,7 +171,7 @@ class CopySyncAction(AbstractSyncAction):
         type = ActionType.UPDATE if (a.exists and b.exists) else ActionType.COPY
 
         super().__init__(a, b, type=type, direction=direction)
-        this._progress = None
+        #this._progress = None
         this._jobid = None
 
     @property
@@ -174,6 +180,10 @@ class CopySyncAction(AbstractSyncAction):
 
     def _repr_type(this) -> str:
         return "+" if this.is_updating else "*"
+
+    def retry(this):
+        super().retry()
+        this._jobid = None
 
     async def apply_action(this, rclone_engine: rclone) -> None:
         if this.excluded:
@@ -198,21 +208,22 @@ class CopySyncAction(AbstractSyncAction):
     async def update_status(this, rclone_engine:rclone) -> None:
 
         if this._jobid is not None:
-            timeout = True
+            try:
+                async for id,status in rclone_engine.jobs:
+                    if id == this._jobid:
+                        match status:
+                            case RCJobStatus.NOT_STARTED:
+                                this._status = SyncStatus.NOT_STARTED
+                            case RCJobStatus.IN_PROGRESS:
+                                this._status = SyncStatus.IN_PROGRESS
+                            case RCJobStatus.FINISHED:
+                                this._status = SyncStatus.SUCCESS
+                            case RCJobStatus.FAILED:
+                                this._status = SyncStatus.FAILED
 
-            async for id,status in rclone_engine.jobs:
-                if id == this._jobid:
-                    match status:
-                        case RCJobStatus.NOT_STARTED:
-                            this._status = SyncStatus.NOT_STARTED
-                        case RCJobStatus.IN_PROGRESS:
-                            this._status = SyncStatus.IN_PROGRESS
-                        case RCJobStatus.FINISHED:
-                            this._status = SyncStatus.SUCCESS
-                        case RCJobStatus.FAILED:
-                            this._status = SyncStatus.FAILED
-
-                    this._update = rclone_engine.get_last_status_update(this._jobid)
+                        this._update = rclone_engine.get_last_status_update(this._jobid)
+            except ClientOSError: #This exception appears when sometimes I stop the jobs. Not sure what's wrong with rclone
+                ...
 
 
         else:
@@ -301,6 +312,8 @@ class SynchManager:
 
         this._changes = Node(name=".")
 
+        this._rclone_manager:Union[rclone|None] = None
+
     def __iter__(this) -> Iterable[AbstractSyncAction]:
         for node in preorder_iter(this._changes):
             if (action := node.get_attr('action')) is not None:
@@ -380,37 +393,80 @@ class SynchManager:
         return new_action
 
     def replace(this, action: AbstractSyncAction, replace_with: AbstractSyncAction) -> None:
-        path = action.b.relative_path if action.direction == ActionDirection.DST2SRC else action.a.relative_path
+        """
+        Replace an action with another one - Useful when an action has changed (ie, from NoActio to Copy)
+        :param action: Action to be replaced
+        :param replace_with: New action
+        """
 
+        #get the path to be found within the tree
+        path = action.b.relative_path if action.direction == ActionDirection.DST2SRC else action.a.relative_path
         path = f"./{path}"
 
+        #find the corresponding node in the tree
         node = find_path(this._changes, path)
 
+        #replace the action
         node.action = replace_with
 
+        #make sure that the tree of changes is consistent with the new change
         this.make_children_as_parent(node)
 
         this.make_subtree_consistent(replace_with, True)
 
+    async def abort(this):
+        assert this._rclone_manager is not None, "No jobs started"
 
-    async def apply_changes(this, rclone_manager: rclone, eventhandler: [SyncEvent | None] = None) -> None:
-        _trigger = _get_trigger_fn(eventhandler)
+        await  this._rclone_manager.stop_pending_jobs()
 
-        manager = TransferManager(rclone_manager,max_transfers=this.max_transfers)
+
 
         async for x in this.changes:
-            manager.append(x)
+            await x.update_status(this._rclone_manager)
 
+
+    async def apply_changes(this, rclone_manager: rclone, eventhandler: [SyncEvent | None] = None) -> None:
+        """
+        Apply changes to the source and/or remote
+
+        :param rclone_manager: An rclone object
+        :param eventhandler: The handler to update with events
+        """
+        _trigger = _get_trigger_fn(eventhandler)
+
+        #make a new transfer manager obkect
+        manager = TransferManager(rclone_manager,max_transfers=this.max_transfers)
+
+        this._rclone_manager = rclone_manager # I set this internally to be used by abort (or other methods)
+
+        # clean previous stopped jobs if any
+        async for gr in rclone_manager.get_group_list():
+            await rclone_manager.delete_group_stats(gr)
+
+        async for x in this.changes:
+            x.retry() # if there were failed transfers/actions, it'll reset their status to be attempted a new transfer
+            manager.append(x) #append the action to the transfer manager
+
+        # the manager will transfer files at batches (E.g., 4) and the while loop checks if there are still pending actions
         while not (await manager.has_finished()):
+            # submit new jobs if I am below the quota
             await manager.attempt_job_submission()
+
+            #checking which actions are still active
             active_actions = [x async for x in manager.actions]
             if len(active_actions) > 0:
+                # if any, I will signal the event handler
                 _trigger("on_synching", SyncEvent(active_actions))
 
+        #when all it's done, I make the change effective inside the action
         async for a in manager.actions_finished:
             this.flush_action(a)
 
+        #local cache is also flushed
         await this._flush_cache()
+
+        # don't this anymore
+        this._rclone_manager = None
 
     async def _flush_cache(this) -> None:
         """
@@ -453,8 +509,14 @@ class SynchManager:
 
 
 
-    def make_children_as_parent(this, action: [AbstractSyncAction | Node], force_no_action: bool = True) -> None:
+    def make_children_as_parent(this, action: [AbstractSyncAction | Node]) -> None:
+        """
+        Make children nodes of the same type as the parent. Useful when the user wants to apply the same action to
+        all files in a directory and subdirectories below it
+        :param action: (New) parent node
+        """
 
+        # Check the input to determine the correct node in the tree
         if isinstance(action, AbstractSyncAction):
             path = action.b.relative_path if action.direction == ActionDirection.DST2SRC else action.a.relative_path
             path = f"./{path}"
@@ -466,10 +528,11 @@ class SynchManager:
         else:
             raise TypeError("The provided action type is not supported")
 
-
+        # get type and direction of the current action
         type = action.type
         dir = action.direction
 
+        #change all the descendend accordingly
         for x in node.descendants:
             a = x.get_attr("action")
 
@@ -478,7 +541,17 @@ class SynchManager:
                 x.set_attrs({"action":a})
 
     def make_action_consistent(this,action:[AbstractSyncAction|Node], force_no_action:bool=True) -> None:
+        """
+        This method is useful to propagate changes in an action when (at least) one of the descendant has changed
+        If all the descendant would have the same action/direction, then the parent node (provided) will be changed as
+        such. If descendants don't have consistend actions, then the parent node (the provided one) will be changed
+        into no action
 
+        :param action: the parent node to check
+        :param force_no_action: Change the action of the parent to no_action no matter what's below it
+        """
+
+        # retrieve the right node from the tree
         if isinstance(action, AbstractSyncAction):
             path = action.b.relative_path if action.direction == ActionDirection.DST2SRC else action.a.relative_path
             path = f"./{path}"
@@ -490,10 +563,12 @@ class SynchManager:
         else:
             raise TypeError("The provided action type is not supported")
 
+        #list of action types, directions, and whether they are excluded
         type = []
         dir  = []
         excluded = []
 
+        #retrieve the above information from all descendants
         for n in node.descendants:
             a = n.get_attr("action")
             excluded.append(a.excluded)
@@ -502,27 +577,34 @@ class SynchManager:
                 type.append(a.type)
                 dir.append(a.direction)
 
+        #if the descendants are all excluded, then the parent node will be excluded too
         if (len(excluded)>0) and (all(excluded)):
             new_action = SynchManager.make_action(action.a, action.b, ActionType.NOTHING, ActionDirection.SRC2DST)
             new_action.excluded = True
         else:
+            # if it has not descendant, then return
             if (len(type) == 0) or (len(dir) == 0):
                 return
 
             set_type = set(type)
             set_dir = set(dir)
 
+            # setting default action/direction to Nothing/>
             new_type = ActionType.NOTHING
             new_dir  = ActionDirection.SRC2DST
 
+            # if all descendants have one direction in the same action
             if (len(set_type)==1) and (len(set_dir)==1):
+                # if so, the current action will be as the descendants
                 new_type = set_type.pop()
                 new_dir = set_dir.pop()
+            #in this case, descendats have mismatched actions and direction, will do something if forced
             elif not force_no_action:
                 return
 
             new_action = SynchManager.make_action(action.a, action.b, new_type, new_dir)
 
+        #update the node tree accordingly
         node.set_attrs({"action": new_action })
 
     def make_subtree_consistent (this,action:[AbstractSyncAction|Node], force_no_action:bool=True) -> None:

@@ -1,0 +1,3 @@
+[submodule "pyrclone"]
+	path = pyrclone
+	url = https://github.com/valerio-afk/pyrclone

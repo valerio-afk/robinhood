@@ -29,16 +29,14 @@ from datetime import datetime
 from copy import copy
 from psutil import disk_partitions
 from config import get_cache_file
-from time import sleep
+from pyrclone.pyrclone import rclone
+from pyrclone.pyrclone.jobs import _fix_isotime
+from concurrent.futures import ProcessPoolExecutor
+import asyncio
 import os
-import subprocess
 import json
 import aiofiles
-import sys
 
-sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
-from pyrclone import rclone
-from pyrclone.jobs import _fix_isotime
 
 # Checks whether RH is running under windows or not
 is_windows = lambda: os.name == 'nt'
@@ -555,6 +553,13 @@ class FileSystemObject:
 
 
     async def get_checksum(this) -> Union[str | None]:
+        """
+        Calculates the cehcksum of a file
+
+        :return: The checksum (if can be calculated) or None. Some remotes don't allow the calculation of the checksum
+                 and files need to be downloaded first. This can be done by rclone. However, this option needs to be
+                 activated by the user, as some remotes put limits on file download
+        """
         if this.type == FileType.DIR:
             return None
 
@@ -786,15 +791,11 @@ class FileSystem(ABC):
 
     def __init__(this, path: str, *,
                  path_manager: Type[AbstractPath],
-                 cached: bool = False,
-                 force: bool = False):
+                 cached: bool = False):
         """
-
         :param path: The root path of the file system
         :param path_manager: Path convention to use (POSIX- or NT-like)
-        :param Interface to rclone
         :param cached: Whether to cache content or not
-        :param force: Force to check the existence of the root directory
         """
         this._path = path_manager(path)
         # Directory tree cache
@@ -809,11 +810,8 @@ class FileSystem(ABC):
         this._path_manager = path_manager
 
         this._cached = cached
-
         this._cache = dict()
 
-        if (not force) and (not this.exists(this.root)):
-            raise FileNotFoundError(this.root)
 
     async def _find_dir_in_cache(this, dir: str) -> Union[Any | None]:
         """
@@ -870,9 +868,16 @@ class FileSystem(ABC):
         return fso
 
     async def _dir(this, path:AbstractPath) -> List[Dict]:
-        dir = []
+        """
+        Internal method listing responsable of listing all the content in a directory.
+        The search is performed in the cache (if present). Otherwise, it'll be performed in the actual (local/remote)
+        filesystem
 
-        # if (path.startswith("/")): path = path[1:]
+        :param path: path to list the content
+        :return: A list of dictonaries representing the json result from rclone
+        """
+
+        dir = []
 
         items = this._cache if this.cached else (await rclone_instance().ls(path.root, path.relative_path))
         relpath = path.relative_path
@@ -936,22 +941,40 @@ class FileSystem(ABC):
 
     @property
     def cached(this) -> bool:
+        """
+        :return: Return TRUE if cache is used. FALSE otherwise
+        """
         return this._cached
 
     @cached.setter
     def cached(this, value: bool) -> None:
+        """
+        Change whether cache needs to be used
+        :param value: TRUE if cache needs to be used. FALSE otherwise
+        """
         this._cached = value
 
     @property
     def base_path(this) -> str:
+        """
+        Gives the basepath of the file system
+        :return: A string representing the bases path of the file system
+        """
         return this._path.root
 
     @property
     def root(this) -> str:
+        """
+        Alias for base_path property method
+        """
         return this.base_path
 
     @property
     def current_path(this) -> str:
+        """
+        Gives the absolute path of the current working directory
+        :return: A string representing the current working directory path
+        """
         return this._path.absolute_path
 
     @property
@@ -1145,95 +1168,6 @@ class LocalFileSystem(FileSystem):
 
         super().__init__(*args, **kwargs)
 
-    # async def _find_local(this, path):
-    #     dirs = []
-    #     files = []
-    #
-    #     path = this.new_path(path, this.root)
-    #
-    #     try:
-    #         for itm in os.scandir(path.absolute_path):
-    #             if itm.is_dir():
-    #                 dirs.append(itm.name)
-    #             elif itm.is_file():
-    #                 files.append(itm.name)
-    #             await asyncio.sleep(0.1)
-    #
-    #         return (path.absolute_path, dirs, files)
-    #     except FileNotFoundError:
-    #         return None
-
-    # def _find_dir_in_cache(this, dir):
-    #     dir_to_search = this.new_path(dir, root=this.base_path).relative_path
-    #     for path, dirs, files in this._cache:
-    #         if (path == dir) or (path == dir_to_search):
-    #             return (path, dirs, files)
-    #
-    #     return None
-
-    # async def ls(this, path=None):
-    #     cp = this.current_path if path is None else path
-    #
-    #     listdir = (await this._find_dir_in_cache(cp)) if this.cached else (await this._find_local(cp))
-    #
-    #     if listdir is None:
-    #         return []
-    #
-    #     _, dirs, files = listdir
-    #
-    #     content = [this._make_local_filesystem_object(x, cp) for x in dirs + files]
-    #
-    #     # content = [f for f in content if all([fn(f) for fn in this.filter_callback]) ]
-    #
-    #     return content
-
-    # def exists(this, filename: str):
-    #     p = this.visit(filename)
-    #
-    #     return os.path.exists(p.absolute_path)
-
-    # def get_file(this, path: AbstractPath) -> FileSystemObject:
-    #     p, name = os.path.split(path.relative_path)
-    #
-    #     if p == "":
-    #         p = "./"
-    #
-    #     return this._make_local_filesystem_object(name, p)
-
-    # def _make_local_filesystem_object(this, filename: str, path: str) -> FileSystemObject:
-    #     fullpath = this.new_path(AbstractPath.join(path, filename), root=this.root)
-    #
-    #     if (this.cached):
-    #         cached_fso = this._get_fso_from_cache(fullpath)
-    #         if (cached_fso is not None):
-    #             cached_fso.update_information()
-    #             return cached_fso
-    #
-    #     info = os.stat(fullpath.absolute_path)
-    #
-    #     type = FileType.OTHER
-    #
-    #     if stat.S_ISDIR(info.st_mode):
-    #         type = FileType.DIR
-    #     elif stat.S_ISREG(info.st_mode):
-    #         type = FileType.REGULAR
-    #
-    #     hidden = filename.startswith(".") or (
-    #             is_windows() and ((info.st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN) != 0))
-    #
-    #     fso = FileSystemObject(fullpath,
-    #                            type=type,
-    #                            size=info.st_size,
-    #                            mtime=datetime.fromtimestamp(info.st_mtime),
-    #                            exists=True,
-    #                            hidden=hidden)
-    #
-    #     if (this.cached):
-    #         this.set_file(fullpath, fso)
-    #
-    #     return fso
-
-
 class RemoteFileSystem(FileSystem):
 
     def __init__(this, *args, **kwargs):
@@ -1298,6 +1232,9 @@ async def fs_autocomplete(path: str, min_chars: int = 3) -> Union[str | None]:
 
 async def synched_walk(source:FileSystem, destination:FileSystem) \
         -> AsyncIterable[Tuple[str,Union[FileSystemObject|None],Union[FileSystemObject|None]]]:
+
+    #async def _
+
     src_tree = { x.relative_path:x async for x in source.walk() }
     dst_tree = {x.relative_path: x async for x in destination.walk()}
 
