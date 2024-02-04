@@ -19,7 +19,7 @@
 # SOFTWARE.
 
 from __future__ import annotations
-from typing import Tuple, List, Union, Iterable
+from typing import Union
 from rich.text import Text
 from rich.console import RenderableType
 from textual import on, work, events
@@ -29,105 +29,55 @@ from textual.worker import Worker, WorkerState
 from textual.containers import  Horizontal, Vertical
 from textual.events import DescendantBlur
 from textual.messages import ExitApp, Message
-from textual.widgets import Header, Footer, Static, Input, Button, Select, DataTable, Label, ProgressBar
-from textual.widgets import TextArea,Switch
+from textual.widgets import Header, Footer, Input, Button, Select, DataTable, Label, ProgressBar
 from events import RobinHoodBackend, SyncEvent
 from enums import SyncMode
 from backend import compare_tree, find_dedupe, apply_changes
 from synching import AbstractSyncAction, SynchManager, SyncStatus, ActionType, ActionDirection
 from commands import make_command
-from filesystem import NTAbstractPath,  fs_auto_determine, rclone_instance, sizeof_fmt
+from filesystem import fs_auto_determine, rclone_instance, sizeof_fmt
 from config import RobinHoodConfiguration, RobinHoodProfile
-from widgets import ComparisonSummary, DisplayFilters, FileDetailsSummary, RobinHoodTopBar, DirectoryComparisonDataTable
+from widgets import (ComparisonSummary,
+                     DisplayFilters,
+                     FileDetailsSummary,
+                     RobinHoodTopBar,
+                     DirectoryComparisonDataTable,
+                     RobinHoodExcludePath,
+                     RobinHoodRemoteList)
 from datetime import timedelta
 import re
 
 def _get_eta(seconds:int) -> str:
+    """Formats ETA in a more human readable format 01h23m34s
+    :param seconds: the amount of second for a task to be completed
+    :return a string with the eta formatted as 01h23m34s. If the task is too long/too slow, it may add days
+    """
+
+    #use the timedelta class get a formatted string
     delta = timedelta(seconds=seconds)
+    #use a regular expression to parse the readable output of timedelta
     m = re.match(r"(([0-9]+) day[s]?,[\s]*)?([0-9]{1,2})\:([0-9]{1,2})\:([0-9]{1,2})", str(delta))
 
+    #extract each individual parts
     days, hh, mm, ss, = m[2], m[3], m[4], m[5]
 
+    #initialise the string to return with an empty string
     eta = ""
+
+    #too long? let's add days in the eta
     if days is not None:
         eta += f"{days}d"
 
+    #now the rest, hours, minutes, and seconds
     eta += f"{hh}h"
     eta += f"{mm}m"
     eta += f"{ss}s"
 
+    #return the formatted string
     return eta
 
-class RobinHoodRemoteList(Static):
-    def __init__(this, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        this.remotes: List[Tuple[str, ...]] = []
-        this.border_title = "Remotes"
-
-    def compose(this) -> ComposeResult:
-        yield DataTable(cursor_type="row")
-
-    async def on_mount(this) -> None:
-
-        if len(this.remotes)==0:
-            this.remotes = await rclone_instance().list_remotes()
 
 
-        header = ("Type", "Drive")
-        table = this.query_one(DataTable)
-
-        table.add_columns(*header)
-
-        for r in this.remotes:
-            table.add_row(r[0], r[1] + NTAbstractPath.VOLUME_SEPARATOR + NTAbstractPath.PATH_SEPARATOR)
-
-
-class RobinHoodExcludePath(Static):
-    def __init__(this, profile: RobinHoodProfile, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        this.border_title = "Path to Exclude"
-        this._profile = profile
-
-    @property
-    def paths(this) -> Iterable[str]:
-        return this._profile.exclusion_filters
-
-    @property
-    def exclude_hidden(this) -> bool:
-        return this._profile.exclude_hidden_files
-
-    @property
-    def deep_comparisons(this) -> bool:
-        return this._profile.deep_comparisons
-
-    def compose(this) -> ComposeResult:
-        yield TextArea()
-        yield Horizontal(
-            Label("Exclude hidden files"),
-            Switch(id="exclude_hidden"),
-            Label("Deep comparison"),
-            Switch(id="deep_comparisons"),
-            id="other_settings"
-        )
-
-    @on(events.Show)
-    def show_filters(this) -> None:
-        if this.paths is not None:
-            textarea = this.query_one(TextArea)
-            textarea.load_text("\n".join(this.paths))
-
-        this.query_one("#exclude_hidden").value = this.exclude_hidden
-        this.query_one("#deep_comparisons").value = this.deep_comparisons
-
-    @on(events.Hide)
-    def save_filters(this) -> None:
-        textarea = this.query_one(TextArea)
-        new_filters = [line for line in textarea.text.splitlines() if len(line) > 0]
-
-        this._profile.exclusion_filters = new_filters
-        this._profile.exclude_hidden_files = this.query_one("#exclude_hidden").value
-        this._profile.deep_comparisons = this.query_one("#deep_comparisons").value
 
 
 class PromptProfileNameModalScreen(ModalScreen):
@@ -196,7 +146,7 @@ class RobinHood(App):
         this._summary_pane: ComparisonSummary = ComparisonSummary(id="summary")
         this._details_pane: FileDetailsSummary = FileDetailsSummary(id="file_details")
         this._progress_bar: ProgressBar = ProgressBar(show_eta=False, id="synch_progbar")
-        this._filter_list: RobinHoodExcludePath = RobinHoodExcludePath(profile=profile, id="filter_list")
+        this._filter_list: RobinHoodExcludePath = RobinHoodExcludePath(profile=this.profile, id="filter_list")
         this._backend: RobinHoodGUIBackendMananger = RobinHoodGUIBackendMananger(this)
         this._display_filters: DisplayFilters = DisplayFilters( classes="hidden")
 
@@ -268,7 +218,7 @@ class RobinHood(App):
         return this.query_one("#source_text_area").value
 
     @src.setter
-    def src(this, value: str) -> str:
+    def src(this, value: str) -> None:
         this.query_one("#source_text_area").value = value
 
     @property
@@ -276,7 +226,7 @@ class RobinHood(App):
         return this.query_one("#dest_text_area").value
 
     @dst.setter
-    def dst(this, value: str) -> str:
+    def dst(this, value: str) -> None:
         this.query_one("#dest_text_area").value = value
 
     @property
@@ -462,10 +412,7 @@ class RobinHood(App):
 
     @work(exclusive=True, name="synching")
     async def _run_synch(this) -> None:
-        cfg = RobinHoodConfiguration()
-
-        this._tree_pane.changes.max_transfers = cfg.current_profile.parallel_transfers
-
+        this._tree_pane.changes.max_transfers =this.profile.parallel_transfers
         await apply_changes(this._tree_pane.changes, eventhandler=this._backend)
 
     def update_progressbar(this, processed:float=0, total:Union[float|None]=None):

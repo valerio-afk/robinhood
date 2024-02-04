@@ -1,12 +1,13 @@
 from __future__ import annotations
+from config import RobinHoodProfile
 from rich.text import Text
 from rich.style import Style
 from rich.console import RenderableType
 from typing import Any, ClassVar, Union, Iterable, Tuple, Dict, List, Set
-from textual import on
+from textual import on, events
 from textual.events import Event
 from textual.reactive import reactive
-from textual.widgets import Switch, Input, Label, Static, Button, Select, DataTable
+from textual.widgets import Switch, Input, Label, Static, Button, Select, DataTable, TextArea
 from textual.widgets.data_table import Column
 from textual.containers import Horizontal, Container
 from highlighted_progressbar import HighlightedProgressBar
@@ -17,9 +18,13 @@ from synching import (SynchManager,
                       ActionType,
                       AbstractSyncAction,
                       SyncDirectionNotPermittedException,
-                      CopySyncAction
-                      )
-from filesystem import FileType, sizeof_fmt, FileSystemObject, fs_autocomplete, AbstractPath
+                      CopySyncAction )
+from filesystem import (FileType, sizeof_fmt,
+                        FileSystemObject,
+                        fs_autocomplete,
+                        AbstractPath,
+                        NTAbstractPath,
+                        rclone_instance)
 from datetime import datetime
 from textual.suggester import Suggester
 from enum import Enum
@@ -143,7 +148,122 @@ def _render_row(action:AbstractSyncAction, width=10):
         case ActionType.DELETE:
             return _render_action_as_delete_action(action)
 
+class RobinHoodExcludePath(Static):
+    """
+    Show a pane where the user can provide a list of patterns for paths to exclude
+    """
+    def __init__(this, profile: RobinHoodProfile, *args, **kwargs):
+        """
 
+        :param profile: The profile to be read/edited
+        :param args: arguments to be provided to the super class
+        :param kwargs: keyword arguments to be provided to the super class
+        """
+        super().__init__(*args, **kwargs)
+        this.border_title = "Path to Exclude"
+        this._pattern_text_area = TextArea()
+        this._exclude_hidden_files_switch = Switch(id="exclude_hidden")
+        this._profile = profile
+
+    @property
+    def paths(this) -> Iterable[str]:
+        """
+        Provides the list of path to exclude
+        :return: List of strings with patterns
+        """
+        return this._profile.exclusion_filters
+
+    @property
+    def exclude_hidden(this) -> bool:
+        """
+        Whether or not to exclude hidden files. The definition of hidden file is system dependent
+        :return: TRUE if hidden files need to be excluded, FALSE otherwise
+        """
+        return this._profile.exclude_hidden_files
+
+    @property
+    def deep_comparisons(this) -> bool:
+        """
+        Whether or not deep comparisons are enabled. This functionality has not been exposed because is too
+        computationally demanding and may download files from remote
+
+        :return: TRUE if deep comparisons are enabled, FALSE otherwise
+        """
+        return this._profile.deep_comparisons
+
+    def compose(this) -> ComposeResult:
+        yield this._pattern_text_area
+        yield Horizontal(
+            Label("Exclude hidden files"),
+            this._exclude_hidden_files_switch,
+            # Label("Deep comparison"),
+            # Switch(id="deep_comparisons"),
+            id="other_settings"
+        )
+
+    @on(events.Show)
+    def show_filters(this) -> None:
+        """
+        This event is triggered when the pane is shown on screen
+        Patterns are shown in the text area and the switch is updated to show whether hidden files are to be
+        excluded or not
+        """
+        if this.paths is not None:
+            this._pattern_text_area.load_text("\n".join(this.paths))
+
+        this._exclude_hidden_files_switch.value = this.exclude_hidden
+        # this.query_one("#deep_comparisons").value = this.deep_comparisons
+
+    @on(events.Hide)
+    def save_filters(this) -> None:
+        """
+        This event is triggered when the pane is hidden from the screen. All changes are stored in the profile
+        """
+        new_filters = [line for line in this._pattern_text_area.text.splitlines() if len(line) > 0]
+
+        this._profile.exclusion_filters = new_filters
+        this._profile.exclude_hidden_files = this._exclude_hidden_files_switch.value
+        # this._profile.deep_comparisons = this.query_one("#deep_comparisons").value
+
+class RobinHoodRemoteList(Static):
+    """
+    This class makes a Static renderable object to display a list of remotes configured on rclone
+    """
+
+    def __init__(this, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        this.remotes: List[Tuple[str, ...]] = []
+        this.border_title = "Remotes"
+        this._datatable = DataTable(cursor_type="row")
+
+    def compose(this) -> ComposeResult:
+        """
+        Generates the necessary widgets
+        :return: Yields a datatable
+        """
+        yield this._datatable
+
+    async def on_mount(this) -> None:
+        """
+        This event is triggered when the widget this class creates is mounted in the TUI
+        """
+
+        # if the list of remotes is 0, it means this is the first time this widget has been shown on screen
+        # let's pull the list of remotes from rclone (can take some time)
+        if len(this.remotes) == 0:
+            this.remotes = await rclone_instance().list_remotes()
+
+        # format the data table
+        header = ("Type", "Drive")
+        table = this._datatable
+
+        # add the headers
+        table.add_columns(*header)
+
+        # now let's add the remotes row by row
+        for r in this.remotes:
+            table.add_row(r[0], r[1] + NTAbstractPath.PATH_SEPARATOR)
 
 class ComparisonSummary(Widget):
     COMPONENT_CLASSES: ClassVar[set[str]] = {

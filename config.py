@@ -153,7 +153,7 @@ class RobinHoodConfiguration:
             # it makes an empty profile
             this._current_profile = RobinHoodProfile()
         else:
-            # else it assign the specified profile to the current_profile
+            # else it assigns the specified profile to the current_profile
             this._current_profile = this[profile_name]
 
     # getitem/setitem allows to get other profile in a dictionary-style fashion
