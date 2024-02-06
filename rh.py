@@ -29,10 +29,7 @@ from tui import RobinHood
 from enums import SyncMode
 from config import RobinHoodProfile, RobinHoodConfiguration, get_config_file
 from typing import Union, Callable, Any
-
-import sys
-sys.path.append("/home/tuttoweb/Documents/repositories/pyrclone")
-from pyrclone import rclone
+from pyrclone.pyrclone import rclone
 
 
 def run_in_asyncio(func:Callable)->Callable:
