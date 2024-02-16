@@ -3,7 +3,7 @@
 # 🏹RobinHood
 RobinHood (shortened RH) is a file synchronisation application that provides a [FreeFileSync](https://freefilesync.org/)-inspired front-end to [``rclone``](https://rclone.org/).
 
-**This application is still a work-in-progress ** and is currently not available through PIP. You are welcome to download and use it (please read carefully licence and disclaimer).
+**This application is still a work-in-progress** and is currently not available through PIP. You are welcome to download and use it (please read carefully licence and disclaimer).
 
 ## 📥Installation
 Python >=3.10 is required to run this application. Furthermore, the following packages are required:
