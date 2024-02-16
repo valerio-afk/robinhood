@@ -4,4 +4,4 @@ psutil==5.9.5
 platformdirs==3.11.0
 aiofiles==23.2.1
 bigtree[pandas]==0.14.3
-aiohttp==3.8.6
+aiohttp==3.9.4rc0
