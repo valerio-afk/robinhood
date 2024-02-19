@@ -9,7 +9,7 @@ from enums import ActionDirection, SyncStatus, ActionType
 from events import SyncEvent, RobinHoodBackend
 from bigtree import Node, add_dict_to_tree_by_path, preorder_iter, postorder_iter, find_path
 from pyrclone.pyrclone import rclone, RCJobStatus
-from aiohttp import ClientOSError
+from aiohttp import ClientOSError, ClientResponseError
 
 
 
@@ -261,28 +261,36 @@ class DeleteSyncAction(AbstractSyncAction):
         if this.excluded:
             return
 
+        this._status = SyncStatus.IN_PROGRESS
+
         fn = rclone_engine.delete_file
 
         if (this.a.type == FileType.DIR) and (this.b.type == FileType.DIR):
             fn = rclone_engine.rmdir
 
-        if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
-            await fn(this.b.fullpath.root, this.b.fullpath.relative_path)
+        try:
+            if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
+                await fn(this.b.fullpath.root, this.b.fullpath.relative_path)
 
-        if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
-            await fn(this.a.fullpath.root, this.a.fullpath.relative_path)
+            if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
+                await fn(this.a.fullpath.root, this.a.fullpath.relative_path)
+        except ClientResponseError as e:
+            if "directory not empty" in e.message:
+                ... #needs to be addressed somehow, for the time being I'll suppose it's a fail
 
     async def update_status(this, rclone_engine:rclone) -> None:
-        src_side = True
-        dst_side = True
 
-        if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
-            dst_side = not (await rclone_engine.exists(this.b.fullpath.root, this.b.fullpath.relative_path))
+        if this.status == SyncStatus.IN_PROGRESS:
+            src_side = True
+            dst_side = True
 
-        if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
-            src_side = not (await rclone_engine.exists(this.a.fullpath.root, this.a.fullpath.relative_path))
+            if (this.direction == ActionDirection.SRC2DST) or (this.direction == ActionDirection.BOTH):
+                dst_side = not (await rclone_engine.exists(this.b.fullpath.root, this.b.fullpath.relative_path))
 
-        this._status = SyncStatus.SUCCESS if src_side and dst_side else SyncStatus.FAILED
+            if (this.direction == ActionDirection.DST2SRC) or (this.direction == ActionDirection.BOTH):
+                src_side = not (await rclone_engine.exists(this.a.fullpath.root, this.a.fullpath.relative_path))
+
+            this._status = SyncStatus.SUCCESS if src_side and dst_side else SyncStatus.FAILED
 
 
     def swap_direction(this) -> None:
@@ -446,6 +454,8 @@ class SynchManager:
         async for x in this.changes:
             x.retry() # if there were failed transfers/actions, it'll reset their status to be attempted a new transfer
             manager.append(x) #append the action to the transfer manager
+
+        manager.rearrange_actions()
 
         # the manager will transfer files at batches (E.g., 4) and the while loop checks if there are still pending actions
         while not (await manager.has_finished()):
@@ -762,3 +772,23 @@ class TransferManager:
     def __delitem__(this, action:AbstractSyncAction) -> None:
         idx = this._actions.index(action)
         del this._actions[idx]
+
+    def rearrange_actions(this) -> None:
+        # Sort the actions in a way that should minimise the risk of deleting a non-empty directory
+        # rclone won't delete non-empty directories. However, it'll cause the deletion to fail
+        # Having any deletion of directories at the end (in reversed order) giving the opportunity to process
+        # all directory's content (if any), this will reduce the risk of annoying X's
+
+        folder_deletion = []
+        other_actions = []
+
+        for action in this._actions:
+            if (action.type == ActionType.DELETE) and (action.is_folder):
+                folder_deletion.append(action)
+            else:
+                other_actions.append(action)
+
+
+        folder_deletion.sort(key=lambda x:x.a.filename if x.a.filename is not None else x.b.filename, reverse=True)
+
+        this._actions = other_actions + folder_deletion

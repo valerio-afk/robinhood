@@ -734,7 +734,13 @@ class DirectoryComparisonDataTable(DataTable):
 
         def is_visible(action: AbstractSyncAction):
             if (this.filter_by_name != None) and (len(this.filter_by_name)>0):
-                match = fnmatch(action.a.relative_path.lower(),this.filter_by_name.lower())
+                filename_filter:str = this.filter_by_name.lower()
+                prepend = "" if filename_filter.startswith("*") else "*"
+                postpend = "" if filename_filter.endswith("*") else "*"
+
+                filename_filter = f"{prepend}{filename_filter}{postpend}"
+
+                match = fnmatch(action.a.relative_path.lower(),filename_filter)
 
                 if match == False:
                     return False
