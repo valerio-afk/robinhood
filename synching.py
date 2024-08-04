@@ -734,11 +734,15 @@ class TransferManager:
 
 
     async def has_finished(this) -> bool:
-        async for _ in this.queued_actions:
-            return False
+        try:
+            async for _ in this.queued_actions:
+                return False
 
-        async for _ in this.actions_in_progress:
-            return False
+            async for _ in this.actions_in_progress:
+                return False
+        except Exception as e:
+            print(e)
+            ...
 
         return True
 

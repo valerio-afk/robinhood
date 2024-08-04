@@ -40,7 +40,11 @@ async def compare_tree(src: Union[str | FileSystem],
     # load file system cache
 
     await src.load()
-    await dest.load()
+
+    try:
+        await dest.load()
+    except FileNotFoundError:
+        ...
 
     # Parse the result obtained  from rclone
     sync_changes = SynchManager(src, dest)
@@ -62,7 +66,7 @@ async def compare_tree(src: Union[str | FileSystem],
     tree = [x async for x in synched_walk(src, dest)]
     processed_items = 0
 
-    async for path, a, b in synched_walk(src, dest):
+    for path, a, b in tree:
         _trigger("on_comparing", SyncEvent(path, processed=processed_items, total=len(tree)))
 
         direction = ActionDirection.BOTH

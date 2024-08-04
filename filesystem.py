@@ -1090,26 +1090,52 @@ class FileSystem(ABC):
         """
         return this._path.visit(path)
 
+    async def fast_walk(this) -> AsyncIterable[str]:
+        cwd = this.new_path(this.current_path, root=this.base_path)
+
+
+        dirs = [cwd]
+
+
+        while (len(dirs)>0):
+            d = dirs.pop()
+
+            for itm in await this._dir(d):
+                yield itm['Path']
+
+                if "directory" in itm['MimeType']:
+                    dirs.append(this.new_path(itm['Path'], root=this.base_path))
+
+
+
+
+
     async def walk(this, path: Union[AbstractPath | None] = None) -> AsyncIterable[FileSystemObject]:
         '''
         Iterate over all files recusiverly from the path (if provided)
         :param path: The path to start walking from. If not specified, the current working  directory is used
-        :return: A generator yielding FileSystemObjecs
+        :return: A generator yielding FileSystemObjec
         '''
-        cwd = this.current_path if path is None else path
 
-        dirs = [cwd]
+        for itm in this._cache:
+            path, _ = os.path.split(itm['Path'])
+            if len(path) == 0:
+                path = './'
 
-        while len(dirs) > 0:
-            d = dirs.pop()
+            yield await this._make_filesystem_object(itm, this.new_path(path).absolute_path)
 
-            for fso in (await this.ls(d)):
-                match fso.type:
-                    case FileType.DIR:
-                        yield fso
-                        dirs.append(fso.absolute_path)
-                    case FileType.REGULAR:
-                        yield fso
+        # dirs = [cwd]
+        #
+        # while len(dirs) > 0:
+        #     d = dirs.pop()
+        #
+        #     for fso in (await this.ls(d)):
+        #         match fso.type:
+        #             case FileType.DIR:
+        #                 yield fso
+        #                 dirs.append(fso.absolute_path)
+        #             case FileType.REGULAR:
+        #                 yield fso
 
     def new_path(this, path: str, root: Union[str | None] = None) -> AbstractPath:
         """
@@ -1235,7 +1261,7 @@ async def synched_walk(source:FileSystem, destination:FileSystem) \
 
     #async def _
 
-    src_tree = { x.relative_path:x async for x in source.walk() }
+    src_tree = {x.relative_path: x async for x in source.walk() }
     dst_tree = {x.relative_path: x async for x in destination.walk()}
 
     all_files = list ( set(src_tree.keys()) | set(dst_tree.keys()) )
